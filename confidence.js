@@ -57,7 +57,7 @@
       var payCash = cashers * CFG.shares * Math.max(0, K - l.S);
       var sdRest = l.sigma1 * (1 + l.H) * Math.sqrt(CFG.session - CFG.cashInMin);
       var payExp = holders * shortfall(CFG.shares, l.S, K, sdRest);
-      l.f = f; l.pol = pol; l.base = base; l.base1 = base1; l.cashers = cashers; l.prem = basePrem + uplift; l.pay = payCash + payExp; l.K = K;
+      l.cashFrac = cashFrac; l.sdRest = sdRest; l.f = f; l.pol = pol; l.base = base; l.base1 = base1; l.cashers = cashers; l.prem = basePrem + uplift; l.pay = payCash + payExp; l.K = K;
       T.base += basePrem; T.uplift += uplift; T.prem += basePrem + uplift; T.payCash += payCash; T.payExp += payExp; T.pay += payCash + payExp;
       T.policies += pol; T.cashers += cashers; T.wait += f.wait; T.surge += f.surge; T.orders += orders;
       T.target += f.Qs * Math.max(0, K - l.S0 * 0.8); T.uMax = Math.max(T.uMax, f.u); T.uSum += f.u;
@@ -76,5 +76,37 @@
       legs: legs, T: T, status: status, ok: ok, net: T.prem - T.pay, reserveUsed: Math.max(0, Math.min(T.uplift, shortBase)) };
   }
 
-  g.PCConfidence = { compute: compute, CFG: CFG, BANDS: BANDS, band: band };
+  /* Running book for the session (since page load / demo reset). compute() above is a what-if snapshot that is
+   * recomputed every tick, so its totals move both ways; the dashboard shows this book instead:
+   *  - collected: premiums actually accrued so far = Σ open policies × live base rate (+ surge uplift) × elapsed minutes. Never decreases.
+   *  - reserve:   the surge-uplift part of collected (100% to the risk reserve). Never decreases.
+   *  - paid:      cash-ins actually paid so far, (K − S) × 100 per cashing policy. Never decreases.
+   *  - open:      open exposure = what Paracord would owe now if every still-open policy cashed in, (K − S)+ × 100 (moves up and down).
+   * Scenario buttons / slider only change the rates going forward. */
+  function newBook() { return { minutes: 0, collected: 0, base: 0, reserve: 0, paid: 0, cashedPol: 0, open: 0, openPol: 0, legs: {} }; }
+  function accrue(B, r, dtMin) {
+    if (!r || !(dtMin > 0)) return B;
+    var open = 0, openPol = 0;
+    r.legs.forEach(function (l) {
+      var L = B.legs[l.d.t] || (B.legs[l.d.t] = { cashed: 0, collected: 0, paid: 0 });
+      var pol = Math.max(0, l.pol - L.cashed);                    // insured crowd minus those who already cashed in
+      var basePrem = pol * l.base1 * dtMin;                         // live per-minute base rate at the current price
+      var uplift = l.pol ? basePrem * l.f.sumMm1 / l.pol : 0;      // surge users pay Base × (M − 1) on top → reserve
+      var cashers = l.S < l.K ? pol * Math.min(1, l.cashFrac * dtMin / CFG.cashInMin) : 0; // optional exercise, spread over the session
+      var pay = cashers * CFG.shares * Math.max(0, l.K - l.S);
+      L.cashed += cashers; L.collected += basePrem + uplift; L.paid += pay;
+      B.base += basePrem; B.reserve += uplift; B.collected += basePrem + uplift; B.paid += pay; B.cashedPol += cashers;
+      var still = pol - cashers;
+      openPol += still; open += still * CFG.shares * Math.max(0, l.K - l.S); // owed now if every open policy cashed in
+    });
+    B.minutes += dtMin; B.open = open; B.openPol = openPol;
+    var need = B.paid + B.open, fmt = function (x) { return Math.round(x).toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }); };
+    if (B.base >= need) { B.ok = 'ok'; B.status = 'Covered: premiums collected cover paid + open exposure'; }
+    else if (B.collected >= need) { B.ok = 'ok'; B.status = 'Covered: surge reserve absorbs the gap'; }
+    else { B.ok = 'bad'; B.status = 'Not covered: ' + fmt(need - B.collected) + ' would come from general capital'; }
+    B.net = B.collected - B.paid;
+    return B;
+  }
+
+  g.PCConfidence = { compute: compute, newBook: newBook, accrue: accrue, CFG: CFG, BANDS: BANDS, band: band };
 })(window);

@@ -20,7 +20,11 @@
   function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
 
   if (!state.conf) state.conf = { target: 0, mood: 0, open: null };
-  var confHist = [], confNoise = 0, confLast = null;
+  // monotonic premium counters: gross charged per policy and in total (rebates credited separately, cash-outs don't reduce them)
+  Object.keys(state.ins).forEach(function (t) { var i = state.ins[t]; if (i.gross == null) i.gross = i.cost + (i.rebates || 0); });
+  if (state.paid == null) state.paid = Object.keys(state.ins).reduce(function (a, t) { return a + state.ins[t].gross; }, 0);
+  if (state.rebated == null) state.rebated = Object.keys(state.ins).reduce(function (a, t) { return a + (state.ins[t].rebates || 0); }, 0);
+  var confHist = [], confNoise = 0, confLast = null, confBook = window.PCConfidence ? window.PCConfidence.newBook() : null; // book resets on page load / demo reset
   var sim = new window.PCSim(STOCKS, state.px);
   STOCKS.forEach(function (s) { if (!state.open[s.t]) state.open[s.t] = sim.hist(s.t)[0]; });
 
@@ -61,7 +65,7 @@
   function enableIns(t) {
     var n = sharesOf(t); if (!n) return;
     var now = simNow();
-    state.ins[t] = { lockIn: sim.price(t), shares: n, enabledAt: now, lastAt: now, cost: 0, blockStart: now, blockCost: 0, blocksDone: 0, rebates: 0 };
+    state.ins[t] = { lockIn: sim.price(t), shares: n, enabledAt: now, lastAt: now, cost: 0, gross: 0, blockStart: now, blockCost: 0, blocksDone: 0, rebates: 0 };
     save();
   }
   function disableIns(t) { var c = state.ins[t] ? state.ins[t].cost : 0; delete state.ins[t]; save(); toast('Insurance off · total demo cost ' + money(c)); }
@@ -77,10 +81,10 @@
       while (from < now) {
         var blockEnd = ins.blockStart + DAY, to = Math.min(now, blockEnd);
         var c = rate * (to - from) / MIN;
-        ins.cost += c; ins.blockCost += c;
+        ins.cost += c; ins.blockCost += c; ins.gross = (ins.gross || 0) + c; state.paid = (state.paid || 0) + c;
         if (to >= blockEnd) { // completed, unbroken 24h block -> D_t = 0.90 on that block (10% rebate)
           var reb = ins.blockCost * (1 - window.PARACORD_RATE_CONSTANTS.D_full_day);
-          ins.cost -= reb; ins.rebates += reb; ins.blocksDone++;
+          ins.cost -= reb; ins.rebates += reb; ins.blocksDone++; state.rebated = (state.rebated || 0) + reb;
           ins.blockStart = blockEnd; ins.blockCost = 0;
           if (ins.blocksDone === 1) toast('🎉 24h insured — 10% off earned (' + money(reb) + ' demo rebate)');
         }
@@ -189,7 +193,7 @@
       '<div class="ratebox"><div class="row between"><span class="small muted">Live insurance rate</span><span data-live="newspill:' + t + '"></span></div>' +
       '<div class="rate" data-live="rate:' + t + '"></div>' +
       '<div class="small muted" data-live="ratesub:' + t + '"></div>' +
-      '<div class="row between" style="margin-top:10px"><span class="small muted">Running cost since enabled</span><b class="num" style="font-size:18px" data-live="cost:' + t + '"></b></div></div>' +
+      '<div class="row between" style="margin-top:10px"><span class="small muted">Premiums charged since enabled</span><b class="num" style="font-size:18px" data-live="cost:' + t + '"></b></div></div>' +
       '<button class="btn ' + (newsScore(t) > 0.01 ? 'ghost' : 'warn') + '" data-act="news" data-t="' + t + '" data-live-btn="news:' + t + '">' + (newsScore(t) > 0.01 ? 'Clear demo news shock' : '⚡ Demo news shock (H → 1)') + '</button>' +
       '</div>' + discountCard(t) + breakdownCard(t) +
       '<button class="btn mint" data-act="cashout" data-t="' + t + '">Cash out at lock-in price</button>';
@@ -228,7 +232,7 @@
   function viewInsured() {
     var ts = Object.keys(state.ins);
     if (!ts.length) return '<div class="card center"><div style="font-size:40px">⛨</div><b>No insured holdings yet</b><p class="muted">Open a stock and switch on Paracord insurance to lock in its price.</p><button class="btn" data-act="tab" data-tab="home">Browse portfolio</button></div>';
-    return '<div class="card hero"><div class="small" style="opacity:.8">Total insurance rate</div><div class="big" data-live="totalrate"></div><div class="small">Protected value: <b data-live="protected"></b> · Cost so far: <b data-live="totalcost"></b></div></div>' +
+    return '<div class="card hero"><div class="small" style="opacity:.8">Total insurance rate</div><div class="big" data-live="totalrate"></div><div class="small">Protected value: <b data-live="protected"></b> · Premiums paid so far: <b data-live="totalcost"></b></div></div>' +
       ts.map(function (t) {
         return '<button class="stock" style="grid-template-columns:40px 1fr auto" data-act="open-stock" data-t="' + t + '">' + tk(t) +
           '<div><div class="nm">' + t + ' · lock ' + money(state.ins[t].lockIn, 2) + '</div><div class="sub" data-live="elapsed:' + t + '"></div><div class="small" data-live="discountmini:' + t + '"></div></div>' +
@@ -361,8 +365,8 @@
       'Demo crowd of 100,000 Paracord users, each holding 100 shares of every demo stock, cushion 5% below the open. ' +
       'Share of users turning insurance on = logistic(−1 − 0.9·move<sub>σ</sub> + 1.6·H − 1.4·mood + noise). ' +
       'Fear = 0.40·insured share + 0.20·cash-in rate + 0.15·waiting-line/surge share + 0.15·drop + 0.10·news H − 0.25·rally; Index = 100 / (1 + e<sup>8·(fear − 0.15)</sup>). ' +
-      'Resilience prices today\'s book with the v3 rate (live repricing; half the session at the open price, half at the moved price), the 1%-of-float capacity cap and surge (half of over-capacity users surge, the rest wait), and the surge-uplift reserve. ' +
-      'Cash-ins are optional: only some users below the cushion cash in (at mid-session); the rest keep coverage. Payouts = cash-ins + expected shortfall of policies still on. Not a forecast.</div></details></div>';
+      'Resilience is a running book for this session: every sim-minute, premiums accrue = open policies × the live v3 base rate (plus surge uplift, which goes to the reserve), within the 1%-of-float capacity cap (half of over-capacity users surge, the rest wait). ' +
+      'Cash-ins are optional: below the cushion some users cash in each minute and are paid (K − S) per share; the rest keep coverage. Open exposure = what would be owed now if every open policy cashed in at (K − S) per share. Premiums in and payouts out only grow; the index and open exposure move freely. Not a forecast.</div></details></div>';
   }
   function confBody(r) {
     var C = window.PCConfidence, T = r.T, v = r.index, d = v - state.conf.open;
@@ -372,14 +376,16 @@
     var pts = h.map(function (x, i) { return (i * 120 / (n - 1)).toFixed(1) + ',' + (34 - x / 100 * 32).toFixed(1); }).join(' ');
     var spark = '<svg class="conf-spark" viewBox="0 0 120 36" preserveAspectRatio="none" aria-label="Index this session"><line x1="0" x2="120" y1="18" y2="18" stroke="#d6d6d6" stroke-dasharray="2 3"/><polyline points="' + pts + '" fill="none" stroke="#111111" stroke-width="1.6" vector-effect="non-scaling-stroke"/></svg>';
     function m(x) { return '$' + Math.round(x).toLocaleString(); }
-    var res = '<div class="conf-res"><div class="row between"><b>Paracord resilience · today</b><span class="small muted">demo book</span></div>' +
-      '<div class="conf-status ' + r.ok + '">' + (r.ok === 'ok' ? '✓ ' : '✕ ') + r.status + '</div>' +
+    var B = confBook || { minutes: 0, collected: 0, reserve: 0, paid: 0, open: 0, openPol: 0, cashedPol: 0, net: 0, ok: 'ok', status: 'Collecting…' };
+    if (!B.status) { B.ok = 'ok'; B.status = 'Collecting…'; B.net = 0; }
+    var res = '<div class="conf-res"><div class="row between"><b>Paracord resilience · this session</b><span class="small muted">demo book · ' + Math.round(B.minutes) + ' sim-min</span></div>' +
+      '<div class="conf-status ' + B.ok + '">' + (B.ok === 'ok' ? '✓ ' : '✕ ') + B.status + '</div>' +
       '<div class="grid2" style="margin-top:8px">' +
-      '<div class="stat"><div class="k">Premiums in</div><div class="v">' + m(T.prem) + '</div><div class="small muted">incl. ' + m(T.uplift) + ' surge</div></div>' +
-      '<div class="stat"><div class="k">Payouts out</div><div class="v' + (T.pay > T.prem ? ' down' : '') + '">' + m(T.pay) + '</div><div class="small muted">cash-ins ' + m(T.payCash) + ' · open ' + m(T.payExp) + '</div></div>' +
-      '<div class="stat"><div class="k">Surge reserve</div><div class="v">' + m(T.uplift) + '</div><div class="small muted">target ' + m(T.target) + (r.reserveUsed > 0 ? ' · used ' + m(r.reserveUsed) : '') + '</div></div>' +
-      '<div class="stat"><div class="k">Capacity use (max)</div><div class="v">' + Math.round(T.uMax * 100) + '%</div><div class="small muted">' + Math.round(T.wait).toLocaleString() + ' waiting · ' + Math.round(T.surge).toLocaleString() + ' surge</div></div>' +
-      '</div><div class="small muted" style="margin-top:6px">Net ' + (r.net >= 0 ? '+' : '−') + m(Math.abs(r.net)) + ' · ' + Math.round(T.policies).toLocaleString() + ' policies across 4 stocks · cash-ins are optional, nothing auto-sells</div></div>';
+      '<div class="stat"><div class="k">Premiums in</div><div class="v" id="conf-prem">' + m(B.collected) + '</div><div class="small muted">collected so far · incl. ' + m(B.reserve) + ' surge</div></div>' +
+      '<div class="stat"><div class="k">Payouts out</div><div class="v' + (B.paid > B.collected ? ' down' : '') + '" id="conf-paid">' + m(B.paid) + '</div><div class="small muted">cash-ins paid so far · ' + Math.round(B.cashedPol).toLocaleString() + ' policies</div></div>' +
+      '<div class="stat"><div class="k">Open exposure</div><div class="v" id="conf-open">' + m(B.open) + '</div><div class="small muted">owed if all ' + Math.round(B.openPol).toLocaleString() + ' open policies cashed in now</div></div>' +
+      '<div class="stat"><div class="k">Surge reserve</div><div class="v" id="conf-res">' + m(B.reserve) + '</div><div class="small muted">target ' + m(T.target) + ' · cap use ' + Math.round(T.uMax * 100) + '% · ' + Math.round(T.wait).toLocaleString() + ' waiting</div></div>' +
+      '</div><div class="small muted" style="margin-top:6px">Net (collected − paid) ' + (B.net >= 0 ? '+' : '−') + m(Math.abs(B.net)) + ' · cover check: collected (incl. reserve) vs paid + open exposure · resets on page load · scenarios change the rate going forward, not past collections · cash-ins are optional, nothing auto-sells</div></div>';
     return '<div class="conf-top"><div><div class="big conf-num">' + v.toFixed(0) + '</div>' +
       '<div class="small"><b>' + r.band + '</b> · <span class="' + (d >= 0 ? 'up' : 'down') + '">' + (d >= 0 ? '+' : '−') + Math.abs(d).toFixed(1) + ' vs open</span></div></div>' + spark + '</div>' + gauge +
       '<div class="small muted conf-drv">Insured ' + Math.round(r.pIns * 100) + '% of users · cash-ins ' + Math.round(r.cashRate * 100) + '% · waiting/surge ' + Math.round(r.lineRate * 100) + '% · market ' + (r.mkt >= 0 ? '+' : '−') + Math.abs(r.mkt).toFixed(1) + 'σ · news H ' + r.H.toFixed(2) + '</div>' + res;
@@ -431,7 +437,7 @@
       case 'total': return money(totals().v, 2);
       case 'protected': return money(totals().p, 2);
       case 'totalrate': return rateStr(totals().r);
-      case 'totalcost': return money(totals().c);
+      case 'totalcost': return money(state.paid || 0) + (state.rebated > 0 ? ' (−' + money(state.rebated) + ' rebates)' : '');
       case 'previewrate': return rateStr(rateOf(t, { shares: sharesOf(t), lockIn: sim.price(t) }));
       case 'simclock': return new Date(simNow()).toLocaleString() + ' · ×' + state.clock.speed;
     }
@@ -444,7 +450,7 @@
       case 'pl': var d = (S - ins.lockIn) * ins.shares; el.className = 'v ' + cls(d); return signed(d) + '<div class="small">' + pct(S / ins.lockIn - 1) + '</div>';
       case 'rate': return rateStr(rateOf(t));
       case 'ratesub': var b = breakdown(t); return 'σ ' + Math.round(annVol(t) * 100) + '% ann. · ' + (b.clampedTo === 'floor' ? 'at $0.02 floor · ' : b.clampedTo === 'cap' ? 'at $6 cap · ' : '') + '≈ ' + money(b.rate / 60, 5) + '/sec';
-      case 'cost': return money(ins.cost);
+      case 'cost': return money(ins.gross != null ? ins.gross : ins.cost) + (ins.rebates > 0 ? ' (−' + money(ins.rebates) + ' rebate)' : '');
       case 'elapsed': return dur(simNow() - ins.enabledAt);
       case 'newspill': var h = newsScore(t); return h > 0.01 ? '<span class="pill news">⚡ News H ' + h.toFixed(2) + '</span>' : '';
       case 'breakdown': return bdHtml(t);
@@ -535,7 +541,7 @@
       case 'skip': accrue(); state.clock.offset += +el.dataset.ms; accrue(); save(); live(); toast('⏩ Skipped ' + (+el.dataset.ms === DAY ? '24 hours' : '1 hour') + ' (demo clock)'); break;
       case 'speed': state.clock.speed = +el.dataset.x; save(); render.noScroll = true; render(); break;
       case 'reset':
-        if (el.dataset.armed) { localStorage.removeItem(KEY); state = freshState(); state.conf = { target: 0, mood: 0, open: null }; confHist = []; confLast = null; sim = new window.PCSim(STOCKS, {}); STOCKS.forEach(function (s) { state.open[s.t] = sim.hist(s.t)[0]; }); save(); replace({ view: 'home' }); toast('Demo reset'); }
+        if (el.dataset.armed) { localStorage.removeItem(KEY); state = freshState(); state.conf = { target: 0, mood: 0, open: null }; confHist = []; confLast = null; confBook = window.PCConfidence ? window.PCConfidence.newBook() : null; state.paid = 0; state.rebated = 0; sim = new window.PCSim(STOCKS, {}); STOCKS.forEach(function (s) { state.open[s.t] = sim.hist(s.t)[0]; }); save(); replace({ view: 'home' }); toast('Demo reset'); }
         else { el.dataset.armed = '1'; el.textContent = 'Tap again to reset everything'; }
         break;
       case 'cashout': go({ view: 'cashout', t: t, step: 'summary', n: state.ins[t].shares, flow: Date.now().toString(36) }); break;
@@ -578,7 +584,7 @@
     // confidence index: ease the crowd mood toward the chosen scenario, small AR(1) noise, then record the session sparkline
     state.conf.mood += (state.conf.target - state.conf.mood) * 0.25;
     confNoise = 0.92 * confNoise + 0.12 * (Math.random() + Math.random() + Math.random() - 1.5) * 2;
-    var cr = confCompute(); if (cr) { confHist.push(cr.index); if (confHist.length > 240) confHist.shift(); }
+    var cr = confCompute(); if (cr) { confHist.push(cr.index); if (confHist.length > 240) confHist.shift(); if (confBook) window.PCConfidence.accrue(confBook, cr, 1); } // 1 tick = 1 sim trading minute
     accrue(); save(); live();
   }
 
@@ -592,5 +598,5 @@
   setInterval(tick, 1000);
 
   // test/demo hook (read-only helpers)
-  window.__paracord = { state: function () { return state; }, rate: rateOf, breakdown: breakdown, sim: sim, news: newsScore, confidence: function () { return confLast; } };
+  window.__paracord = { state: function () { return state; }, rate: rateOf, breakdown: breakdown, sim: sim, news: newsScore, confidence: function () { return confLast; }, book: function () { return confBook; } };
 })();
