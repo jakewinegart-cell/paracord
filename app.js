@@ -7,6 +7,8 @@
   var KEY = 'paracord-demo-v2';
   var DAY = 24 * 3600 * 1000, MIN = 60000;
   var NEWS_TAU_MIN = 20, NEWS_WINDOW_MIN = 30; // per paracord-pricing-v1.md
+  var RC = window.PARACORD_RATE_CONSTANTS;
+  var SIMMIN_YEARS = 1 / (1440 * 252); // v4 floor clock: one 24h sim-day of 24/7 cover = one trading day (no market calendar in the demo)
 
   /* ---------------- state ---------------- */
   function freshState() {
@@ -55,18 +57,29 @@
       lockIn: opt.lockIn != null ? opt.lockIn : (ins ? ins.lockIn : sim.price(t)),
       sigma1: sim.sigma1(t), float: d.float, adv: d.adv, news: newsScore(t),
       inCompletedDayBlock: false, // D_t applied as a rebate at block end (see accrue)
-      elapsedMs: ins ? simNow() - ins.enabledAt : 0
+      elapsedMs: ins ? simNow() - ins.enabledAt : 0,
+      // v4 rate lock: S, sigma_1 and H frozen at lock start; taper day n and floor clock tau from the lock's tenure
+      lock: ins ? ins.lock : null, day: ins ? tenure(ins).day : 1, tau: ins ? tenure(ins).tau : 0, minuteYears: SIMMIN_YEARS
     };
   }
+  function tenure(ins, at) { var e = Math.max(0, (at == null ? simNow() : at) - ins.enabledAt); return { day: Math.floor(e / DAY) + 1, tau: e / DAY / 252, e: e }; }
+  function lockNow(t) { return { price: sim.price(t), sigma1: sim.sigma1(t), news: newsScore(t), at: simNow() }; }
+  /* per-person caps (rate.js CAP_PER_STOCK / CAP_TOTAL): insured value = K x shares, per verified person, not per account */
+  function otherInsured(t) { return Object.keys(state.ins).reduce(function (a, u) { return u === t ? a : a + state.ins[u].lockIn * state.ins[u].shares; }, 0); }
+  function capFor(t, K) { return window.paracordCapShares(K, sharesOf(t), otherInsured(t)); }
+  function capWhy(t, K) { return Math.min(RC.CAP_PER_STOCK, RC.CAP_TOTAL - otherInsured(t)) >= RC.CAP_PER_STOCK ? '$' + RC.CAP_PER_STOCK.toLocaleString() + ' per-stock limit' : '$' + RC.CAP_TOTAL.toLocaleString() + ' total limit'; }
+  function capLine(t, K, covered) { var y = sharesOf(t); return covered < y ? covered + ' of ' + y + ' shares covered - ' + capWhy(t, K) : 'All ' + y + ' shares covered (within the $' + RC.CAP_PER_STOCK.toLocaleString() + ' per-stock limit)'; }
   function breakdown(t, opt) { return window.insuranceRateBreakdown(rateInputs(t, opt)); }
   function rateOf(t, opt) { return window.insuranceRatePerMinute(rateInputs(t, opt)); }
 
   /* ---------------- insurance ---------------- */
   function enableIns(t) {
-    var n = sharesOf(t); if (!n) return;
+    if (!sharesOf(t)) return false;
+    var K = sim.price(t), n = capFor(t, K);
+    if (!n) { toast('Coverage limit reached: $' + RC.CAP_TOTAL.toLocaleString() + ' insured value per person'); return false; }
     var now = simNow();
-    state.ins[t] = { lockIn: sim.price(t), shares: n, enabledAt: now, lastAt: now, cost: 0, gross: 0, blockStart: now, blockCost: 0, blocksDone: 0, rebates: 0 };
-    save();
+    state.ins[t] = { lockIn: K, shares: n, enabledAt: now, lastAt: now, cost: 0, gross: 0, blockStart: now, blockCost: 0, blockRebate: 0, blocksDone: 0, rebates: 0, lock: lockNow(t) };
+    save(); return true;
   }
   function disableIns(t) { var c = state.ins[t] ? state.ins[t].cost : 0; delete state.ins[t]; save(); toast('Insurance off · total demo cost ' + money(c)); }
 
@@ -74,24 +87,52 @@
     var now = simNow();
     Object.keys(state.ins).forEach(function (t) {
       var ins = state.ins[t];
-      ins.shares = Math.min(ins.shares, sharesOf(t));
+      if (!ins.lock) ins.lock = lockNow(t); // p7 state: lock at the current conditions
+      if (ins.blockRebate == null) ins.blockRebate = 0;
+      ins.shares = Math.min(ins.shares, sharesOf(t), capFor(t, ins.lockIn));
       if (ins.shares <= 0) { delete state.ins[t]; return; }
-      var rate = rateOf(t); // $/min, D_t = 1 while the current 24h block is open
-      var from = ins.lastAt;
+      // v4: bill in steps of <= 1 sim-minute. Each step = min(cap, max(ops min, locked base x taper f(n), 1.15 x put-floor increment)).
+      // D_t = 1 while the 24h block is open; the 10% (base part only) is tracked per step and rebated when the block completes.
+      var from = ins.lastAt, o = rateInputs(t), step = Math.max(MIN, Math.ceil((now - from) / 20000 / MIN) * MIN); // coarser steps only for very long gaps
       while (from < now) {
-        var blockEnd = ins.blockStart + DAY, to = Math.min(now, blockEnd);
-        var c = rate * (to - from) / MIN;
-        ins.cost += c; ins.blockCost += c; ins.gross = (ins.gross || 0) + c; state.paid = (state.paid || 0) + c;
-        if (to >= blockEnd) { // completed, unbroken 24h block -> D_t = 0.90 on that block (10% rebate)
-          var reb = ins.blockCost * (1 - window.PARACORD_RATE_CONSTANTS.D_full_day);
+        var blockEnd = ins.blockStart + DAY, to = Math.min(now, blockEnd, from + step);
+        var e1 = from - ins.enabledAt, e2 = to - ins.enabledAt, mins = (to - from) / MIN;
+        o.day = Math.floor(e1 / DAY) + 1;
+        var c1 = window.paracordChargeForInterval(o, e1 / DAY / 252, e2 / DAY / 252, mins, 1);
+        var c9 = window.paracordChargeForInterval(o, e1 / DAY / 252, e2 / DAY / 252, mins, RC.D_full_day);
+        var c = c1.charge;
+        ins.cost += c; ins.blockCost += c; ins.blockRebate += c1.charge - c9.charge; ins.gross = (ins.gross || 0) + c; state.paid = (state.paid || 0) + c;
+        if (to >= blockEnd) { // completed, unbroken 24h block -> D_t = 0.90 on that block's base part (rebate; the put floor is not discounted)
+          var reb = ins.blockRebate;
           ins.cost -= reb; ins.rebates += reb; ins.blocksDone++; state.rebated = (state.rebated || 0) + reb;
-          ins.blockStart = blockEnd; ins.blockCost = 0;
-          if (ins.blocksDone === 1) toast('🎉 24h insured — 10% off earned (' + money(reb) + ' demo rebate)');
+          ins.blockStart = blockEnd; ins.blockCost = 0; ins.blockRebate = 0;
+          if (ins.blocksDone === 1) toast('🎉 24h insured — 10% off the base earned (' + money(reb) + ' demo rebate)');
         }
         from = to;
       }
       ins.lastAt = now;
     });
+  }
+
+  /* ---------------- membership (annual, paid up front, non-refundable) ---------------- */
+  function isMember() { return !!(state.member && state.member.until > simNow()); }
+  function dateStr(ms) { return new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); }
+  function memberBadge() {
+    if (!isMember()) return '';
+    var m = state.member;
+    return '<div class="member-badge"><span class="pill gold">★ Member</span> <span class="small"><b>Annual membership, non-refundable</b> · $' + m.fee + '/yr · ' + (m.autoRenew ? 'renews ' : 'ends ') + dateStr(m.until) + '</span></div>';
+  }
+  function memberSheet() {
+    var fee = RC.MEMBERSHIP_FEE, until = simNow() + 365 * DAY;
+    return '<h2>Paracord membership</h2><div class="demo-tag">DEMO — nothing is charged</div>' +
+      '<div class="card"><div class="big">$' + fee + '<span class="small muted"> / year</span></div><div style="font-weight:800;margin:4px 0 8px">Annual membership, non-refundable</div>' +
+      '<ul class="small member-terms">' +
+      '<li><b>Charged up front today</b> for 12 months (to ' + dateStr(until) + '), on top of the per-minute insurance premiums. Membership lets you turn on Paracord insurance; premiums are billed separately.</li>' +
+      '<li><b>Non-refundable.</b> No full or partial refund if you cancel early, stop using insurance, or close your account, except where the law requires one.</li>' +
+      '<li><b>Renews automatically</b> every year at $' + fee + ' on ' + dateStr(until) + ' unless you cancel before then. We email a reminder before each renewal. Cancel online in one step (Demo menu → Membership); you keep access until the end of the paid year.</li>' +
+      '<li><b>Coverage limits:</b> $' + RC.CAP_PER_STOCK.toLocaleString() + ' insured value per stock and $' + RC.CAP_TOTAL.toLocaleString() + ' in total (lock-in price × shares), per verified person (identity check), not per brokerage account.</li></ul>' +
+      '<label class="row small member-agree" style="gap:8px;align-items:flex-start;margin-top:8px"><input type="checkbox" id="memberAgree"> <span>I understand the $' + fee + ' annual membership is charged today, is <b>non-refundable</b>, and renews each year until I cancel.</span></label></div>' +
+      '<button class="btn" id="memberJoin" data-act="member-join" data-t="' + (route.t || '') + '" disabled>Join for $' + fee + '/year (demo)</button><button class="btn ghost" data-act="close-sheet">Not now</button>';
   }
 
   /* ---------------- formatting ---------------- */
@@ -164,7 +205,7 @@
     var held = heldTickers();
     return '<div class="card hero"><div class="small" style="opacity:.8">Total holdings (simulated)</div><div class="big" data-live="total"></div>' +
       '<div class="row between small" style="margin-top:8px"><span>Protected: <b data-live="protected"></b></span><span>Insurance: <b data-live="totalrate"></b></span></div>' +
-      (state.cash > 0 ? '<div class="row between small" style="margin-top:6px"><span>Cash from shares sold to Paracord</span><b>' + money(state.cash, 2) + '</b></div>' : '') + '</div>' +
+      (state.cash > 0 ? '<div class="row between small" style="margin-top:6px"><span>Cash from shares sold to Paracord</span><b>' + money(state.cash, 2) + '</b></div>' : '') + memberBadge() + '</div>' +
       confCard() + invCard() +
       '<div class="card"><div class="row between"><h3 style="margin:0">Linked accounts</h3><button class="btn sm ghost" data-act="link">+ Link account</button></div>' +
       '<div class="badges" style="margin-top:10px">' + (state.linked.length ? state.linked.map(function (a) { return bb(a); }).join('') : '<span class="muted">No accounts linked</span>') + '</div></div>' +
@@ -174,28 +215,32 @@
   }
 
   function insuranceCard(t) {
-    var ins = state.ins[t], n = sharesOf(t);
-    var head = '<div class="row between"><div><div style="font-weight:800;font-size:17px">Paracord insurance</div><div class="small muted">Lock in today\'s price for your ' + n + ' shares</div></div>' +
-      '<button class="toggle" role="switch" aria-label="Paracord insurance" aria-checked="' + (!!ins) + '" data-act="toggle-ins" data-t="' + t + '"></button></div>';
+    var ins = state.ins[t], n = sharesOf(t), S = sim.price(t);
+    var covN = ins ? ins.shares : capFor(t, S);
+    var head = '<div class="row between"><div><div style="font-weight:800;font-size:17px">Paracord insurance</div><div class="small muted">Lock in today\'s price for ' + (covN < n ? covN + ' of your ' + n : 'your ' + n) + ' shares</div></div>' +
+      '<button class="toggle" role="switch" aria-label="Paracord insurance" aria-checked="' + (!!ins) + '" data-act="toggle-ins" data-t="' + t + '"></button></div>' +
+      '<div class="capline small" data-live="capline:' + t + '"></div><div class="small muted">Limits are per verified person (identity/KYC), not per account: $' + RC.CAP_PER_STOCK.toLocaleString() + ' per stock, $' + RC.CAP_TOTAL.toLocaleString() + ' total (K × shares).</div>';
     if (!ins) {
-      return '<div class="card">' + head + '<div class="ratebox"><div class="small muted">If enabled now (lock-in at current price)</div>' +
-        '<div class="rate" style="font-size:26px" data-live="previewrate:' + t + '"></div><div class="small muted">Rate updates live with simulated volatility & news</div></div>' +
-        '<div class="small muted">Turning this on sets your lock-in to the current simulated price. You can cash out insured shares to Paracord at the lock-in price any time (demo).</div></div>';
+      return '<div class="card">' + head + '<div class="ratebox"><div class="small muted">If enabled now (rate locks at the current price, volatility and news)</div>' +
+        '<div class="rate" style="font-size:26px" data-live="previewrate:' + t + '"></div><div class="small muted" data-live="previewsub:' + t + '"></div></div>' +
+        (isMember() ? memberBadge() : '<div class="small member-req"><b>Requires Paracord membership:</b> $' + RC.MEMBERSHIP_FEE + '/year, charged up front. <b>Annual membership, non-refundable.</b> Full terms shown before you join.</div>') +
+        '<div class="small muted">Turning this on sets your lock-in to the current simulated price and locks your rate. You can cash out insured shares to Paracord at the lock-in price any time (demo).</div></div>';
     }
-    var S = sim.price(t);
     return '<div class="card">' + head +
       '<div class="grid2" style="margin-top:14px">' +
       '<div class="stat"><div class="k">Lock-in price (K)</div><div class="v" data-live="lock:' + t + '"></div></div>' +
-      '<div class="stat"><div class="k">Max protected</div><div class="v" data-live="maxprot:' + t + '"></div><div class="small muted">' + ins.shares + ' sh × lock-in</div></div>' +
+      '<div class="stat"><div class="k">Max protected</div><div class="v" data-live="maxprot:' + t + '"></div><div class="small muted" data-live="maxprotsub:' + t + '"></div></div>' +
       '<div class="stat"><div class="k">Now vs lock-in</div><div class="v" data-live="pl:' + t + '"></div></div>' +
       '<div class="stat"><div class="k">Insured for</div><div class="v" style="font-size:15px" data-live="elapsed:' + t + '"></div></div></div>' +
-      '<div style="margin-top:12px"><div class="row between small"><span class="muted">Adjust lock-in K (demo re-lock, K ≤ price)</span><b data-live="kpct:' + t + '"></b></div>' +
+      '<div style="margin-top:12px"><div class="row between small"><span class="muted">Adjust lock-in K (re-lock at today\'s conditions, K ≤ price; raising K restarts day 1)</span><b data-live="kpct:' + t + '"></b></div>' +
       '<input type="range" id="kslider" data-t="' + t + '" min="' + (S * 0.85).toFixed(2) + '" max="' + Math.max(S, ins.lockIn).toFixed(2) + '" step="0.01" value="' + ins.lockIn.toFixed(2) + '" aria-label="Lock-in price slider"></div>' +
-      '<div class="ratebox"><div class="row between"><span class="small muted">Live insurance rate</span><span data-live="newspill:' + t + '"></span></div>' +
+      '<div class="ratebox" id="ratebox"><div class="row between"><span class="small muted">Your insurance rate</span><span class="pill lockpill">🔒 Rate locked at start</span></div>' +
       '<div class="rate" data-live="rate:' + t + '"></div>' +
+      '<div class="small" data-live="ratetenure:' + t + '"></div>' +
       '<div class="small muted" data-live="ratesub:' + t + '"></div>' +
       '<div class="row between" style="margin-top:10px"><span class="small muted">Premiums charged since enabled</span><b class="num" style="font-size:18px" data-live="cost:' + t + '"></b></div></div>' +
       '<button class="btn ' + (newsScore(t) > 0.01 ? 'ghost' : 'warn') + '" data-act="news" data-t="' + t + '" data-live-btn="news:' + t + '">' + (newsScore(t) > 0.01 ? 'Clear demo news shock' : '⚡ Demo news shock (H → 1)') + '</button>' +
+      '<div class="small muted" style="margin-top:4px">News and surge change the rate for new locks and re-locks only; your locked rate does not move with the price.</div>' +
       '</div>' + discountCard(t) + breakdownCard(t) +
       '<button class="btn mint" data-act="cashout" data-t="' + t + '">Cash out at lock-in price</button>';
   }
@@ -205,15 +250,15 @@
       '<svg class="ring" viewBox="0 0 84 84"><circle cx="42" cy="42" r="34" fill="none" stroke="#d6d6d6" stroke-width="9"/>' +
       '<circle data-live="ring:' + t + '" cx="42" cy="42" r="34" fill="none" stroke="#c8102e" stroke-width="9" stroke-linecap="round" transform="rotate(-90 42 42)" stroke-dasharray="213.6" stroke-dashoffset="213.6"/>' +
       '<text data-live="ringpct:' + t + '" x="42" y="47" text-anchor="middle" fill="#111111" font-size="15" font-weight="800"></text></svg>' +
-      '<div style="flex:1"><div data-live="discount:' + t + '"></div><div class="small muted" style="margin-top:4px">Keep insurance on for a full, unbroken 24h to get 10% off that day\'s charges (D<sub>t</sub> = 0.90).</div>' +
+      '<div style="flex:1"><div data-live="discount:' + t + '"></div><div class="small muted" style="margin-top:4px">Keep insurance on for a full, unbroken 24h to get 10% off that day\'s base charges (D<sub>t</sub> = 0.90; the put-value floor is not discounted).</div>' +
       '<div class="row" style="margin-top:8px;gap:6px"><button class="btn sm ghost" data-act="skip" data-ms="3600000">⏩ +1h</button><button class="btn sm ghost" data-act="skip" data-ms="' + DAY + '">⏩ +24h</button></div></div></div></div>';
   }
 
   function breakdownCard(t) {
     return '<div class="card breakdown"><details class="how" open><summary>How this rate is computed</summary>' +
-      '<div class="formula">R = clamp(c·E·L·(1+3H), $0.02, $6.00) · D\nc = 0.0029/min · h = 390 min</div>' +
+      '<div class="formula">R = min($6, max($0.002, c·E·L·(1+3H)·f(n)·D, 1.15·N·ΔP<sub>BS</sub>))\nc = 0.0029/min · h = 390 min · f(n) = max(√n − √(n−1), 0.05)\nS, σ₁, H locked at start · n = day of the lock</div>' +
       '<div data-live="breakdown:' + t + '"></div>' +
-      '<div class="small muted" style="margin-top:8px">Draft formula v1 (placeholder, rate.js → insuranceRatePerMinute). F and ADV are simulated demo values.</div></details></div>';
+      '<div class="small muted" style="margin-top:8px">Draft pricing v4 (placeholder, rate.js → insuranceRatePerMinute; paracord-pricing-v4.md). F and ADV are simulated demo values. Demo clock: one 24h sim-day counts as one trading day.</div></details></div>';
   }
 
   function viewStock(t) {
@@ -256,7 +301,9 @@
       '<div class="seg" style="margin:10px 0">' + [1, 60, 600].map(function (x) { return '<button class="' + (sp === x ? 'on' : '') + '" data-act="speed" data-x="' + x + '">×' + x + '</button>'; }).join('') + '</div>' +
       '<div class="grid2"><button class="btn ghost" data-act="skip" data-ms="3600000">⏩ Skip 1 hour</button><button class="btn ghost" data-act="skip" data-ms="' + DAY + '">⏩ Skip 24 hours</button></div>' +
       '<div class="small muted" style="margin-top:8px">Fast-forward accrues insurance cost at the current rate and advances the 24h discount progress.</div></div>' +
-      '<div class="card"><h3>Reset</h3><button class="btn danger" data-act="reset">Reset demo</button><div class="small muted" style="margin-top:8px">Clears insured flags, lock-ins, timestamps, linked accounts and receipts from this browser.</div></div>';
+      '<div class="card"><h3>Membership</h3>' + (isMember() ? memberBadge() + '<div class="small muted" style="margin:6px 0">Auto-renewal is ' + (state.member.autoRenew ? 'on' : 'off') + '. Cancelling stops the next renewal; the current year is non-refundable and stays active until ' + dateStr(state.member.until) + '.</div>' +
+        '<button class="btn sm ghost" data-act="member-autorenew">' + (state.member.autoRenew ? 'Cancel auto-renewal (one step)' : 'Turn auto-renewal back on') + '</button>' : '<div class="small muted">Not a member. Annual membership, non-refundable: $' + RC.MEMBERSHIP_FEE + '/year, shown with full terms when you first turn on insurance.</div>') + '</div>' +
+      '<div class="card"><h3>Reset</h3><button class="btn danger" data-act="reset">Reset demo</button><div class="small muted" style="margin-top:8px">Clears insured flags, lock-ins, timestamps, membership, linked accounts and receipts from this browser.</div></div>';
   }
   function viewDemo() {
     return '<div class="demo-tag">DEMO MENU</div><p class="muted small">Everything in Paracord is simulated: prices are a random walk, accounts and holdings are fake, and no trade ever happens.</p>' + demoControls() +
@@ -265,6 +312,7 @@
 
   /* ---------- sheets ---------- */
   function renderSheet() {
+    if (route.sheet === 'member') return memberSheet();
     if (route.sheet === 'demo') return '<h2>Demo menu</h2>' + demoControls() + '<button class="btn ghost" data-act="close-sheet">Close</button>';
     if (route.sheet === 'link-pick') {
       return '<h2>Link a brokerage</h2><div class="demo-tag">DEMO — simulated link, no password</div><p class="small muted">Pick a brokerage. You\'ll approve a simulated read-only link — no credentials are ever requested.</p>' +
@@ -398,10 +446,11 @@
       '<label class="small muted conf-sl" for="confSlider">Crowd mood &amp; market move <b id="conf-sl-v"></b></label>' +
       '<input type="range" id="confSlider" min="-100" max="100" step="5" value="' + Math.round(tg * 100) + '" aria-label="Crowd mood and market move"></div>' +
       '<details class="how small"><summary>How it\'s computed</summary><div class="muted">' +
-      'Demo crowd of 100,000 Paracord users, each holding 100 shares of every demo stock, cushion 5% below the open. ' +
+      'Demo crowd of 100,000 Paracord users, each holding 100 shares of every demo stock, cushion 5% below the open; covered shares are capped per verified person at $' + RC.CAP_PER_STOCK.toLocaleString() + ' per stock and $' + RC.CAP_TOTAL.toLocaleString() + ' in total (K × shares). ' +
       'Share of users turning insurance on = logistic(−1 − 0.9·move<sub>σ</sub> + 1.6·H − 1.4·mood + noise). ' +
       'Fear = 0.40·insured share + 0.20·cash-in rate + 0.15·waiting-line/surge share + 0.15·drop + 0.10·news H − 0.25·rally; Index = 100 / (1 + e<sup>8·(fear − 0.15)</sup>). ' +
-      'Resilience is a running book for this session: every sim-minute, premiums accrue = open policies × the live v3 base rate (plus surge uplift, which goes to the reserve), within the 1%-of-float capacity cap (half of over-capacity users surge, the rest wait). ' +
+      'Resilience is a running book for this session: every sim-minute, premiums accrue = open policies × their v4 rate, locked when they turned insurance on (users who join later lock at the conditions then), × the duration taper, never below 1.15 × the put-value floor (plus surge uplift, which goes to the reserve), within the 1%-of-float capacity cap (half of over-capacity users surge, the rest wait). ' +
+      'Every user who turns insurance on pays the $' + RC.MEMBERSHIP_FEE + ' annual membership up front; it is non-refundable, so it is counted as cash kept with no refund liability (for accounting it is earned over 12 months). ' +
       'Cash-ins are optional and physically settled: below the cushion some users cash in each minute; Paracord pays them K × shares and takes the shares into its inventory (see the next card). Open exposure = the loss if every open policy cashed in now, (K − S) per share. Premiums in, cash out and inventory shares only grow; the index, inventory value and open exposure move freely. Not a forecast.</div></details></div>';
   }
   function confBody(r) {
@@ -423,9 +472,10 @@
       '<div class="stat"><div class="k">Cash in · premiums</div><div class="v" id="conf-prem">' + m(B.collected) + '</div><div class="small muted">collected so far · incl. ' + m(B.reserve) + ' surge reserve</div></div>' +
       '<div class="stat"><div class="k">Cash out · cash-in purchases</div><div class="v" id="conf-paid">' + m(B.cashOut) + '</div><div class="small muted">paid K × shares · ' + Math.round(B.cashedPol).toLocaleString() + ' policies</div></div>' +
       '<div class="stat"><div class="k">Stock inventory</div><div class="v" id="conf-inv">' + m(B.invValue) + '</div><div class="small muted">market value now · cost ' + m(B.invCost) + '</div></div>' +
+      '<div class="stat"><div class="k">Membership fees · non-refundable</div><div class="v" id="conf-memb">' + m(B.membership || 0) + '</div><div class="small muted">' + Math.round(B.members || 0).toLocaleString() + ' members × $' + (B.fee || RC.MEMBERSHIP_FEE) + ' annual, paid up front · kept, no refund liability</div></div>' +
       '<div class="stat"><div class="k">Open exposure</div><div class="v" id="conf-open">' + m(B.open) + '</div><div class="small muted">loss if all ' + Math.round(B.openPol).toLocaleString() + ' open policies cashed in now (cash needed ' + m(B.openCash) + ')</div></div>' +
       '</div><div class="row between" style="margin-top:8px"><b>Net position</b><b class="' + (B.net >= 0 ? 'up' : 'down') + '" id="conf-net">' + sg(B.net) + '</b></div>' +
-      '<div class="small muted" style="margin-top:4px">Net position = premiums − cash paid + inventory at market · status: net position vs open exposure (surge reserve ' + m(B.reserve) + ', target ' + m(T.target) + ') · capacity use ' + Math.round(T.uMax * 100) + '%, ' + Math.round(T.wait).toLocaleString() + ' waiting · resets on page load · scenarios change rates going forward, not past collections · nothing auto-sells</div></div>';
+      '<div class="small muted" style="margin-top:4px">Net position = premiums + membership fees − cash paid + inventory at market · rates locked at start (v4) · status: net position vs open exposure (surge reserve ' + m(B.reserve) + ', target ' + m(T.target) + ') · capacity use ' + Math.round(T.uMax * 100) + '%, ' + Math.round(T.wait).toLocaleString() + ' waiting · resets on page load · scenarios change rates going forward, not past collections · nothing auto-sells</div></div>';
     return '<div class="conf-top"><div><div class="big conf-num">' + v.toFixed(0) + '</div>' +
       '<div class="small"><b>' + r.band + '</b> · <span class="' + (d >= 0 ? 'up' : 'down') + '">' + (d >= 0 ? '+' : '−') + Math.abs(d).toFixed(1) + ' vs open</span></div></div>' + spark + '</div>' + gauge +
       '<div class="small muted conf-drv">Insured ' + Math.round(r.pIns * 100) + '% of users · cash-ins ' + Math.round(r.cashRate * 100) + '% · waiting/surge ' + Math.round(r.lineRate * 100) + '% · market ' + (r.mkt >= 0 ? '+' : '−') + Math.abs(r.mkt).toFixed(1) + 'σ · news H ' + r.H.toFixed(2) + '</div>' + res;
@@ -458,13 +508,15 @@
   }
   function bdHtml(t) {
     var b = breakdown(t), d = BY_T[t], ins = state.ins[t];
-    var blocks = ins ? ins.blocksDone : 0;
+    var blocks = ins ? ins.blocksDone : 0, lk = ins && ins.lock;
     function term(sym, name, val, ex) { return '<div class="term"><span class="sym">' + sym + '</span><div><b>' + name + '</b><div class="ex">' + ex + '</div></div><span class="val">' + val + '</span></div>'; }
-    return term('E', 'Expected shortfall', money(b.E, 2), 'N·S·σ<sub>h</sub>·G(z) = ' + (ins ? ins.shares : 0) + ' × ' + money(sim.price(t), 2) + ' × ' + (b.sigma_h * 100).toFixed(2) + '% × ' + b.G.toFixed(4) + '<br>σ₁ ' + (b.sigma1 * 100).toFixed(3) + '%/min' + (sim.sigma1Floored(t) ? ' (floored)' : '') + ' · z = ' + b.z.toFixed(2)) +
+    return term('E', 'Expected shortfall (at lock)', money(b.E, 2), 'N·S·σ<sub>h</sub>·G(z) = ' + (ins ? ins.shares : 0) + ' × ' + money(b.S_rate, 2) + ' × ' + (b.sigma_h * 100).toFixed(2) + '% × ' + b.G.toFixed(4) + '<br>S = max(price at lock, K) · σ₁ ' + (b.sigma1 * 100).toFixed(3) + '%/min at lock · z = ' + b.z.toFixed(2)) +
       term('L', 'Liquidity factor', '×' + b.L.toFixed(3), 'max(1,(1B/F)^0.1)·(1+10·N/ADV) = ' + b.Lfloat.toFixed(3) + ' × ' + b.Lsize.toFixed(4) + '<br>F ' + big(d.float) + ' · ADV ' + big(d.adv) + ' (simulated)') +
-      term('H', 'News-shock score', b.H.toFixed(2) + ' → ×' + b.newsFactor.toFixed(2), '1 + 3·H; demo shock sets H = 1, decays e<sup>−age/20 min</sup>, ignored after 30 min') +
-      term('D', 'Full-day discount', blocks ? '0.90 ✓' : '1.00', blocks ? blocks + ' completed 24h block' + (blocks > 1 ? 's' : '') + ' billed at 0.90 (' + money(ins.rebates, 2) + ' rebated); current block at 1.00 until it completes' : 'Becomes 0.90 for a completed unbroken 24h block (applied as a 10% rebate)') +
-      term('R', 'Rate', rateStr(b.rate), 'raw ' + money(b.raw, 4) + '/min' + (b.clampedTo === 'floor' ? ' → floor $0.02' : b.clampedTo === 'cap' ? ' → cap $6.00' : ''));
+      term('H', 'News score (at lock)', b.H.toFixed(2) + ' → ×' + b.newsFactor.toFixed(2), '1 + 3·H, frozen at lock. A new shock changes new locks and re-locks only.') +
+      term('f', 'Duration taper', '×' + b.taper.toFixed(3), 'day ' + b.day + ' of the lock: f(n) = max(√n − √(n−1), 0.05). Day 1 = 1.00, day 2 = 0.41, day 20 = 0.11. Total cost grows like √days, like a put. Turning coverage off resets to day 1.') +
+      term('P', 'Put-value floor', money(b.floor, 4) + '/min', '1.15 × N × [P(τ+1 min) − P(τ)], Black-Scholes put at S, K, σ from the lock; τ = ' + (b.tau * 252).toFixed(2) + ' trading days covered. Cumulative charge ≥ 1.15 × the put.' + (b.clampedTo === 'putfloor' ? ' <b>Binds now.</b>' : '')) +
+      term('D', 'Full-day discount', blocks ? '0.90 ✓' : '1.00', blocks ? blocks + ' completed 24h block' + (blocks > 1 ? 's' : '') + ' billed at 0.90 on the base part (' + money(ins.rebates, 2) + ' rebated); current block at 1.00 until it completes' : 'Becomes 0.90 on the base part for a completed unbroken 24h block (applied as a rebate)') +
+      term('R', 'Rate now', rateStr(b.rate), 'base₁ ' + money(b.baseRaw, 4) + '/min × f ' + b.taper.toFixed(3) + ' = ' + money(b.base, 4) + '/min' + (b.clampedTo === 'putfloor' ? ' → put floor' : b.clampedTo === 'cap' ? ' → cap $6.00' : b.clampedTo === 'opsmin' ? ' → $0.002 minimum' : ''));
   }
   function liveVal(kind, t, el) {
     var ins = t && state.ins[t];
@@ -478,7 +530,10 @@
       case 'protected': return money(totals().p, 2);
       case 'totalrate': return rateStr(totals().r);
       case 'totalcost': return money(state.paid || 0) + (state.rebated > 0 ? ' (−' + money(state.rebated) + ' rebates)' : '');
-      case 'previewrate': return rateStr(rateOf(t, { shares: sharesOf(t), lockIn: sim.price(t) }));
+      case 'previewrate': var pn = capFor(t, sim.price(t)); return pn ? rateStr(rateOf(t, { shares: pn, lockIn: sim.price(t) })) : '—';
+      case 'previewsub': var pn2 = capFor(t, sim.price(t)), pb = breakdown(t, { shares: pn2, lockIn: sim.price(t) });
+        return 'First minute of a new lock' + (pb.clampedTo === 'putfloor' ? ' (put-value floor)' : pb.clampedTo === 'cap' ? ' ($6 cap)' : '') + '; then day 1 base ' + rateStr(pb.baseRaw) + ', day 2 ×0.41, day 20 ×0.11. Live preview moves with volatility & news until you lock.';
+      case 'capline': var cn = ins ? ins.shares : capFor(t, sim.price(t)); return capLine(t, ins ? ins.lockIn : sim.price(t), cn);
       case 'simclock': return new Date(simNow()).toLocaleString() + ' · ×' + state.clock.speed;
     }
     if (!ins) return '';
@@ -487,9 +542,12 @@
       case 'lock': return money(ins.lockIn, 2);
       case 'kpct': return money(ins.lockIn, 2) + ' (' + ((ins.lockIn / S - 1) * 100).toFixed(1) + '% vs price)';
       case 'maxprot': return money(ins.shares * ins.lockIn, 2);
+      case 'maxprotsub': return ins.shares + ' sh × lock-in' + (ins.shares < sharesOf(t) ? ' (of ' + sharesOf(t) + ' held)' : '');
       case 'pl': var d = (S - ins.lockIn) * ins.shares; el.className = 'v ' + cls(d); return signed(d) + '<div class="small">' + pct(S / ins.lockIn - 1) + '</div>';
       case 'rate': return rateStr(rateOf(t));
-      case 'ratesub': var b = breakdown(t); return 'σ ' + Math.round(annVol(t) * 100) + '% ann. · ' + (b.clampedTo === 'floor' ? 'at $0.02 floor · ' : b.clampedTo === 'cap' ? 'at $6 cap · ' : '') + '≈ ' + money(b.rate / 60, 5) + '/sec';
+      case 'ratetenure': var bt = breakdown(t); return '<b>Day ' + bt.day + ' of your lock</b> · tenure discount ' + (bt.taper < 1 ? '−' + Math.round((1 - bt.taper) * 100) + '%' : 'starts day 2 (−59%)') + ' (taper ×' + bt.taper.toFixed(3) + ')' + (bt.clampedTo === 'putfloor' ? ' · put-value floor applies' : bt.clampedTo === 'cap' ? ' · at $6/min cap' : '');
+      case 'ratesub': var b = breakdown(t), lk = ins.lock || {};
+        return 'Rate locked at start: S ' + money(b.S_rate, 2) + ' · σ ' + Math.round(b.sigAnn * 100) + '% · news H ' + (lk.news || 0).toFixed(2) + ' (' + new Date(lk.at || ins.enabledAt).toLocaleString() + ', sim). Price moves don\'t change it. ≈ ' + money(b.rate / 60, 5) + '/sec';
       case 'cost': return money(ins.gross != null ? ins.gross : ins.cost) + (ins.rebates > 0 ? ' (−' + money(ins.rebates) + ' rebate)' : '');
       case 'elapsed': return dur(simNow() - ins.enabledAt);
       case 'newspill': var h = newsScore(t); return h > 0.01 ? '<span class="pill news">⚡ News H ' + h.toFixed(2) + '</span>' : '';
@@ -573,8 +631,19 @@
         state.holdings = state.holdings.filter(function (h) { return h.acct !== el.dataset.b; });
         accrue(); save(); render.noScroll = true; render(); toast(BY_B[el.dataset.b].name + ' unlinked (demo)'); break;
       case 'toggle-ins':
-        if (state.ins[t]) disableIns(t); else { enableIns(t); toast('⛨ Insured at ' + money(sim.price(t), 2) + ' (demo)'); }
+        if (state.ins[t]) disableIns(t);
+        else if (!isMember()) { openSheet('member', { t: t }); break; }
+        else if (enableIns(t)) toast('⛨ Insured ' + state.ins[t].shares + ' sh at ' + money(sim.price(t), 2) + ' · rate locked (demo)');
         render.noScroll = true; render(); break;
+      case 'member-join':
+        var ag = document.getElementById('memberAgree'); if (!ag || !ag.checked) break;
+        state.member = { joinedAt: simNow(), until: simNow() + 365 * DAY, fee: RC.MEMBERSHIP_FEE, autoRenew: true, nonRefundable: true };
+        save(); var mt = el.dataset.t;
+        if (mt && BY_T[mt] && !state.ins[mt]) enableIns(mt);
+        history.go(-(route.sheetDepth || 1));
+        toast('★ Member · $' + RC.MEMBERSHIP_FEE + '/yr annual membership, non-refundable (demo, nothing charged)' + (mt && state.ins[mt] ? ' · ' + mt + ' insured' : '')); break;
+      case 'member-autorenew':
+        if (state.member) { state.member.autoRenew = !state.member.autoRenew; save(); render.noScroll = true; render(); toast(state.member.autoRenew ? 'Auto-renewal on' : 'Auto-renewal cancelled · membership stays active until ' + dateStr(state.member.until) + ' (no refund)'); } break;
       case 'news':
         if (newsScore(t) > 0.01) state.news[t] = []; else { state.news[t] = [{ at: simNow(), sev: 1, rel: 1 }]; toast('⚡ Demo news shock on ' + t + ' — H = 1, decays over ~20 sim-min'); }
         save(); live(); break;
@@ -605,9 +674,16 @@
   document.addEventListener('input', function (e) {
     if (e.target.id === 'coN' || e.target.id === 'coR') setN(+e.target.value);
     if (e.target.id === 'confSlider') confSet(+e.target.value / 100);
+    if (e.target.id === 'memberAgree') { var jb = document.getElementById('memberJoin'); if (jb) jb.disabled = !e.target.checked; }
     if (e.target.id === 'kslider') {
       var t = e.target.dataset.t, ins = state.ins[t]; if (!ins) return;
-      accrue(); ins.lockIn = Math.min(+e.target.value, sim.price(t)); save(); live();
+      accrue();
+      var oldK = ins.lockIn, newK = Math.min(+e.target.value, sim.price(t));
+      // v4: changing K is a re-lock at today's conditions; tenure (taper day, floor clock) is kept only when K is lowered
+      ins.lockIn = newK; ins.lock = lockNow(t);
+      if (newK > oldK + 1e-9) { var nw = simNow(); ins.enabledAt = nw; ins.blockStart = nw; ins.blockCost = 0; ins.blockRebate = 0; }
+      ins.shares = capFor(t, newK);
+      save(); live();
     }
   });
   document.getElementById('backBtn').onclick = function () { history.back(); };
@@ -638,5 +714,5 @@
   setInterval(tick, 1000);
 
   // test/demo hook (read-only helpers)
-  window.__paracord = { state: function () { return state; }, rate: rateOf, breakdown: breakdown, sim: sim, news: newsScore, confidence: function () { return confLast; }, book: function () { return confBook; } };
+  window.__paracord = { state: function () { return state; }, rate: rateOf, breakdown: breakdown, capFor: capFor, isMember: isMember, sim: sim, news: newsScore, confidence: function () { return confLast; }, book: function () { return confBook; } };
 })();

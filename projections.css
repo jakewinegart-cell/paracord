@@ -61,3 +61,6 @@
 .pj-covnote{margin-top:6px;line-height:1.35}
 .pj-exercise{margin-top:10px;padding:9px 10px;border:1px solid var(--line);border-radius:10px;background:var(--panel2);line-height:1.35}
 .pj-kpi:first-child .v,.pj-kpi:nth-child(4) .v:not(.down){color:var(--accent)}
+/* p8: long v4 breakdown values wrap instead of squeezing the label */
+.pj-line span{flex:1 1 45%;min-width:0}
+.pj-line b{flex:0 1 auto;max-width:58%;white-space:normal;overflow-wrap:anywhere}

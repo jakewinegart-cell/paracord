@@ -136,3 +136,12 @@ details.how[open] summary::after{content:"▴"}
 .inv-bar{display:inline-block;width:18px;height:6px;border-radius:3px;background:var(--panel2);margin-right:4px;vertical-align:middle;overflow:hidden}
 .inv-bar i{display:block;height:100%;background:#111}
 .inv .btn[disabled]{opacity:.45;cursor:not-allowed;width:auto}
+
+/* p8 / pricing v4: rate lock, caps, membership */
+.lockpill { background: #111111; color: #ffffff; font-size: 11px; padding: 3px 8px; }
+.capline { margin-top: 8px; font-weight: 700; }
+.member-badge { margin-top: 10px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.member-req { margin: 10px 0 6px; padding: 8px 10px; border: 1px solid #d6d6d6; border-radius: 10px; background: #fafafa; }
+.member-terms li { margin-bottom: 6px; }
+.member-agree input { margin-top: 2px; width: 18px; height: 18px; flex: none; }
+#memberJoin[disabled] { opacity: .45; }
