@@ -9,7 +9,7 @@ button{font:inherit;color:inherit;cursor:pointer}
 .demo-banner{position:sticky;top:0;z-index:30;background:repeating-linear-gradient(45deg,#f59e0b,#f59e0b 10px,#fbbf24 10px,#fbbf24 20px);color:#1a1200;font-weight:800;font-size:12px;text-align:center;padding:5px 8px;letter-spacing:.3px}
 .topbar{position:sticky;top:25px;z-index:20;display:flex;align-items:center;gap:8px;padding:10px 14px;background:rgba(11,16,32,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line);min-height:56px}
 .brand{display:flex;align-items:center;gap:8px;font-weight:800;font-size:19px}
-.logo{display:inline-grid;place-items:center;width:30px;height:30px;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--accent2));font-size:18px}
+.logo{display:block;width:32px;height:32px;flex:none}
 .title{flex:1;font-weight:700;font-size:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .brand+.title:empty{flex:1}
 .icon-btn{width:44px;height:44px;border-radius:12px;border:1px solid var(--line);background:var(--panel);font-size:20px}
