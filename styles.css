@@ -9,7 +9,7 @@ button{font:inherit;color:inherit;cursor:pointer}
 .phone{position:relative;max-width:440px;min-height:100vh;margin:0 auto;background:var(--bg);display:flex;flex-direction:column;box-shadow:0 0 40px #0000001a}
 .demo-banner{position:sticky;top:0;z-index:30;background:repeating-linear-gradient(45deg,#e4e4e4,#e4e4e4 10px,#d6d6d6 10px,#d6d6d6 20px);color:#111111;font-weight:800;font-size:12px;text-align:center;padding:5px 8px;letter-spacing:.3px}
 .topbar{position:sticky;top:25px;z-index:20;display:flex;align-items:center;gap:8px;padding:10px 14px;background:rgba(255,255,255,.94);backdrop-filter:blur(8px);border-bottom:1px solid var(--line);min-height:56px}
-.brand{display:flex;align-items:center;gap:8px;font-weight:800;font-size:19px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:19px}
 .logo{display:block;width:32px;height:32px;flex:none}
 .title{flex:1;font-weight:700;font-size:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .brand+.title:empty{flex:1}
