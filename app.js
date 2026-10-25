@@ -19,6 +19,8 @@
   if (state.v !== 2) state = freshState();
   function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
 
+  if (!state.conf) state.conf = { target: 0, mood: 0, open: null };
+  var confHist = [], confNoise = 0, confLast = null;
   var sim = new window.PCSim(STOCKS, state.px);
   STOCKS.forEach(function (s) { if (!state.open[s.t]) state.open[s.t] = sim.hist(s.t)[0]; });
 
@@ -158,6 +160,7 @@
     var held = heldTickers();
     return '<div class="card hero"><div class="small" style="opacity:.8">Total holdings (simulated)</div><div class="big" data-live="total"></div>' +
       '<div class="row between small" style="margin-top:8px"><span>Protected: <b data-live="protected"></b></span><span>Insurance: <b data-live="totalrate"></b></span></div></div>' +
+      confCard() +
       '<div class="card"><div class="row between"><h3 style="margin:0">Linked accounts</h3><button class="btn sm ghost" data-act="link">+ Link account</button></div>' +
       '<div class="badges" style="margin-top:10px">' + (state.linked.length ? state.linked.map(function (a) { return bb(a); }).join('') : '<span class="muted">No accounts linked</span>') + '</div></div>' +
       '<h3 class="muted small" style="margin:16px 4px 8px;text-transform:uppercase;letter-spacing:.6px">Your stocks · live (simulated)</h3>' +
@@ -340,6 +343,62 @@
     replace({ view: 'cashout', t: t, step: 'receipt', ref: ref, flow: route.flow });
   }
 
+  /* ---------------- User Confidence Index (demo) ---------------- */
+  function confCtx() {
+    return { mood: state.conf.mood, noise: confNoise, price: function (t) { return sim.price(t); }, open: function (t) { return state.open[t]; },
+      sigma1: function (t) { return sim.sigma1(t); }, news: newsScore };
+  }
+  function confCompute() { if (!window.PCConfidence) return null; confLast = window.PCConfidence.compute(confCtx()); if (state.conf.open == null) { state.conf.open = confLast.index; } return confLast; }
+  function confCard() {
+    var tg = state.conf.target;
+    function b(v, l) { return '<button class="' + (Math.abs(tg - v) < 0.001 ? 'on' : '') + '" data-act="conf" data-v="' + v + '">' + l + '</button>'; }
+    return '<div class="card conf" id="conf-card"><div class="row between"><h3 style="margin:0">User Confidence Index</h3><span class="demo-tag">DEMO DATA</span></div>' +
+      '<div id="conf-body"></div>' +
+      '<div class="conf-ctl"><div class="small muted" style="margin:10px 0 6px">Demo scenario</div><div class="seg" id="conf-seg">' + b(-0.5, 'Panic day') + b(0, 'Normal') + b(1, 'Euphoria') + '</div>' +
+      '<label class="small muted conf-sl" for="confSlider">Crowd mood &amp; market move <b id="conf-sl-v"></b></label>' +
+      '<input type="range" id="confSlider" min="-100" max="100" step="5" value="' + Math.round(tg * 100) + '" aria-label="Crowd mood and market move"></div>' +
+      '<details class="how small"><summary>How it\'s computed</summary><div class="muted">' +
+      'Demo crowd of 100,000 Paracord users, each holding 100 shares of every demo stock, cushion 5% below the open. ' +
+      'Share of users turning insurance on = logistic(−1 − 0.9·move<sub>σ</sub> + 1.6·H − 1.4·mood + noise). ' +
+      'Fear = 0.40·insured share + 0.20·cash-in rate + 0.15·waiting-line/surge share + 0.15·drop + 0.10·news H − 0.25·rally; Index = 100 / (1 + e<sup>8·(fear − 0.15)</sup>). ' +
+      'Resilience prices today\'s book with the v3 rate (live repricing; half the session at the open price, half at the moved price), the 1%-of-float capacity cap and surge (half of over-capacity users surge, the rest wait), and the surge-uplift reserve. ' +
+      'Cash-ins are optional: only some users below the cushion cash in (at mid-session); the rest keep coverage. Payouts = cash-ins + expected shortfall of policies still on. Not a forecast.</div></details></div>';
+  }
+  function confBody(r) {
+    var C = window.PCConfidence, T = r.T, v = r.index, d = v - state.conf.open;
+    var gauge = '<div class="conf-gauge">' + C.BANDS.map(function (bd) { return '<span class="' + (r.band === bd[2] ? 'on' : '') + '" style="width:20%">' + bd[2] + '</span>'; }).join('') +
+      '<i style="left:' + Math.min(99, Math.max(1, v)) + '%"></i></div>';
+    var h = confHist.length > 1 ? confHist : [v, v], n = h.length;
+    var pts = h.map(function (x, i) { return (i * 120 / (n - 1)).toFixed(1) + ',' + (34 - x / 100 * 32).toFixed(1); }).join(' ');
+    var spark = '<svg class="conf-spark" viewBox="0 0 120 36" preserveAspectRatio="none" aria-label="Index this session"><line x1="0" x2="120" y1="18" y2="18" stroke="#d6d6d6" stroke-dasharray="2 3"/><polyline points="' + pts + '" fill="none" stroke="#111111" stroke-width="1.6" vector-effect="non-scaling-stroke"/></svg>';
+    function m(x) { return '$' + Math.round(x).toLocaleString(); }
+    var res = '<div class="conf-res"><div class="row between"><b>Paracord resilience · today</b><span class="small muted">demo book</span></div>' +
+      '<div class="conf-status ' + r.ok + '">' + (r.ok === 'ok' ? '✓ ' : '✕ ') + r.status + '</div>' +
+      '<div class="grid2" style="margin-top:8px">' +
+      '<div class="stat"><div class="k">Premiums in</div><div class="v">' + m(T.prem) + '</div><div class="small muted">incl. ' + m(T.uplift) + ' surge</div></div>' +
+      '<div class="stat"><div class="k">Payouts out</div><div class="v' + (T.pay > T.prem ? ' down' : '') + '">' + m(T.pay) + '</div><div class="small muted">cash-ins ' + m(T.payCash) + ' · open ' + m(T.payExp) + '</div></div>' +
+      '<div class="stat"><div class="k">Surge reserve</div><div class="v">' + m(T.uplift) + '</div><div class="small muted">target ' + m(T.target) + (r.reserveUsed > 0 ? ' · used ' + m(r.reserveUsed) : '') + '</div></div>' +
+      '<div class="stat"><div class="k">Capacity use (max)</div><div class="v">' + Math.round(T.uMax * 100) + '%</div><div class="small muted">' + Math.round(T.wait).toLocaleString() + ' waiting · ' + Math.round(T.surge).toLocaleString() + ' surge</div></div>' +
+      '</div><div class="small muted" style="margin-top:6px">Net ' + (r.net >= 0 ? '+' : '−') + m(Math.abs(r.net)) + ' · ' + Math.round(T.policies).toLocaleString() + ' policies across 4 stocks · cash-ins are optional, nothing auto-sells</div></div>';
+    return '<div class="conf-top"><div><div class="big conf-num">' + v.toFixed(0) + '</div>' +
+      '<div class="small"><b>' + r.band + '</b> · <span class="' + (d >= 0 ? 'up' : 'down') + '">' + (d >= 0 ? '+' : '−') + Math.abs(d).toFixed(1) + ' vs open</span></div></div>' + spark + '</div>' + gauge +
+      '<div class="small muted conf-drv">Insured ' + Math.round(r.pIns * 100) + '% of users · cash-ins ' + Math.round(r.cashRate * 100) + '% · waiting/surge ' + Math.round(r.lineRate * 100) + '% · market ' + (r.mkt >= 0 ? '+' : '−') + Math.abs(r.mkt).toFixed(1) + 'σ · news H ' + r.H.toFixed(2) + '</div>' + res;
+  }
+  function confSliderLabel(v) { var mv = v < 0 ? v * 3 : v * 1.5; return (v < -0.6 ? 'Extreme panic' : v < -0.2 ? 'Panic' : v > 0.6 ? 'Euphoria' : v > 0.2 ? 'Upbeat' : 'Normal') + ' · market ' + (mv >= 0 ? '+' : '−') + Math.abs(mv).toFixed(1) + 'σ'; }
+  function confLive() {
+    var body = document.getElementById('conf-body'); if (!body) return;
+    var r = confLast || confCompute(); if (!r) return;
+    body.innerHTML = confBody(r);
+    var lv = document.getElementById('conf-sl-v'); if (lv) lv.textContent = confSliderLabel(state.conf.target);
+  }
+  function confSet(v, withNews) {
+    state.conf.target = Math.max(-1, Math.min(1, v));
+    if (withNews != null) STOCKS.forEach(function (s) { state.news[s.t] = withNews ? [{ at: simNow(), sev: 1, rel: 1 }] : []; });
+    document.querySelectorAll('#conf-seg button').forEach(function (b) { b.classList.toggle('on', Math.abs(+b.dataset.v - state.conf.target) < 0.001); });
+    var sl = document.getElementById('confSlider'); if (sl && document.activeElement !== sl) sl.value = Math.round(state.conf.target * 100);
+    save(); confCompute(); confLive();
+  }
+
   /* ---------------- live updates ---------------- */
   function sparkPts(t) {
     var h = sim.hist(t).slice(-40), mn = Math.min.apply(null, h), mx = Math.max.apply(null, h), r = mx - mn || 1;
@@ -412,6 +471,7 @@
     var cs = document.getElementById('cosum');
     if (cs && route.view === 'cashout' && state.ins[route.t]) cs.innerHTML = coRows(route.t, Math.min(route.n || state.ins[route.t].shares, state.ins[route.t].shares));
     drawChart();
+    confLive();
   }
 
   function drawChart() {
@@ -475,7 +535,7 @@
       case 'skip': accrue(); state.clock.offset += +el.dataset.ms; accrue(); save(); live(); toast('⏩ Skipped ' + (+el.dataset.ms === DAY ? '24 hours' : '1 hour') + ' (demo clock)'); break;
       case 'speed': state.clock.speed = +el.dataset.x; save(); render.noScroll = true; render(); break;
       case 'reset':
-        if (el.dataset.armed) { localStorage.removeItem(KEY); state = freshState(); sim = new window.PCSim(STOCKS, {}); STOCKS.forEach(function (s) { state.open[s.t] = sim.hist(s.t)[0]; }); save(); replace({ view: 'home' }); toast('Demo reset'); }
+        if (el.dataset.armed) { localStorage.removeItem(KEY); state = freshState(); state.conf = { target: 0, mood: 0, open: null }; confHist = []; confLast = null; sim = new window.PCSim(STOCKS, {}); STOCKS.forEach(function (s) { state.open[s.t] = sim.hist(s.t)[0]; }); save(); replace({ view: 'home' }); toast('Demo reset'); }
         else { el.dataset.armed = '1'; el.textContent = 'Tap again to reset everything'; }
         break;
       case 'cashout': go({ view: 'cashout', t: t, step: 'summary', n: state.ins[t].shares, flow: Date.now().toString(36) }); break;
@@ -484,6 +544,8 @@
       case 'co-review': go(Object.assign({}, route, { step: 'confirm' })); break;
       case 'co-confirm': doCashout(); break;
       case 'receipt-done': history.go(-2); break;
+      case 'conf': var cv = +el.dataset.v; confSet(cv, cv < 0 ? true : false);
+        toast(cv < 0 ? '⚡ Demo panic day: market −1.5σ, news shock on all four' : cv > 0 ? 'Demo euphoria: market +1.5σ, news cleared' : 'Demo normal day: news cleared'); break;
     }
   });
   function setN(n) {
@@ -496,6 +558,7 @@
   }
   document.addEventListener('input', function (e) {
     if (e.target.id === 'coN' || e.target.id === 'coR') setN(+e.target.value);
+    if (e.target.id === 'confSlider') confSet(+e.target.value / 100);
     if (e.target.id === 'kslider') {
       var t = e.target.dataset.t, ins = state.ins[t]; if (!ins) return;
       accrue(); ins.lockIn = Math.min(+e.target.value, sim.price(t)); save(); live();
@@ -512,6 +575,10 @@
     lastReal = nowR;
     sim.step();
     STOCKS.forEach(function (s) { state.px[s.t] = sim.price(s.t); });
+    // confidence index: ease the crowd mood toward the chosen scenario, small AR(1) noise, then record the session sparkline
+    state.conf.mood += (state.conf.target - state.conf.mood) * 0.25;
+    confNoise = 0.92 * confNoise + 0.12 * (Math.random() + Math.random() + Math.random() - 1.5) * 2;
+    var cr = confCompute(); if (cr) { confHist.push(cr.index); if (confHist.length > 240) confHist.shift(); }
     accrue(); save(); live();
   }
 
@@ -525,5 +592,5 @@
   setInterval(tick, 1000);
 
   // test/demo hook (read-only helpers)
-  window.__paracord = { state: function () { return state; }, rate: rateOf, breakdown: breakdown, sim: sim, news: newsScore };
+  window.__paracord = { state: function () { return state; }, rate: rateOf, breakdown: breakdown, sim: sim, news: newsScore, confidence: function () { return confLast; } };
 })();
