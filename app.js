@@ -432,7 +432,11 @@
     var top = '<div class="conf-top"><div><div class="small muted">Market value now</div><div class="big inv-num" id="inv-value">' + m(B.invValue) + '</div>' +
       '<div class="small">Cost paid ' + m(B.invCost) + ' · <span class="' + (pl >= 0 ? 'up' : 'down') + '" id="inv-pl">' + sg(pl) + ' unrealized</span> · <span class="' + (today >= 0 ? 'up' : 'down') + '">' + sg(today) + ' today</span></div></div>' +
       '<svg class="conf-spark" viewBox="0 0 120 36" preserveAspectRatio="none" aria-label="Inventory value this session"><polyline points="' + pts + '" fill="none" stroke="#111111" stroke-width="1.6" vector-effect="non-scaling-stroke"/></svg></div>';
-    if (!tks.length) return top + '<div class="small muted" style="margin-top:10px">No cash-ins yet this session. Try the Panic day scenario.</div>';
+    if (!tks.length) {
+      var near = confLast ? confLast.legs.filter(function (l) { return l.S < l.K * 1.01; }).length : 0;
+      return top + '<div class="small muted" style="margin-top:10px" id="inv-empty">No cash-ins yet this session. Users may only cash in once a stock is 5% below the open (their cash-in line K): on a Normal day only about 10–15 of the ' + (confLast ? confLast.nNames : 503) + ' names get there, mostly after the first sim hour; Panic day and Crash bring the first ones within about 5–20 sim-min. ' +
+        (near ? near + ' name' + (near === 1 ? ' is' : 's are') + ' within 1% of the line now.' : 'No name is within 1% of the line yet.') + '</div>';
+    }
     function cm(x) { var v = Math.abs(x), s = v >= 1e9 ? (v / 1e9).toFixed(2) + 'B' : v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : v >= 1e4 ? (v / 1e3).toFixed(0) + 'K' : Math.round(v).toLocaleString(); return '$' + s; }
     function cs(x) { return (x >= 0 ? '+' : '−') + cm(x); }
     function csh(x) { return x >= 1e6 ? (x / 1e6).toFixed(2) + 'M' : x >= 1e4 ? (x / 1e3).toFixed(0) + 'K' : Math.round(x).toLocaleString(); }
@@ -471,6 +475,7 @@
     Object.keys(B.inv).forEach(function (t) { mv += (B.inv[t].sh - (N.sh0[t] || 0)) * B.inv[t].px; });
     var net = (B.collected - N.col0) - (B.cashOut - N.cash0) + mv, aft = net - (B.open || 0);
     netRec(N.net, net, m); netRec(N.aft, aft, m); N.m = m;
+    N.colT = B.collected - N.col0; N.cashT = B.cashOut - N.cash0; N.mvT = mv; // p11: today's parts, shown under the panel title
     N.hist.push([m, net, aft]); if (N.hist.length > NET_SESSION + 2) N.hist.shift();
     netLast = netSnap(B);
   }
@@ -497,6 +502,7 @@
     }
     return '<div class="net-range" id="net-range" data-day="' + N.day + '">' +
       '<div class="small"><b>Net today</b> <span class="muted">· sim day ' + N.day + ' · ' + tradeClock(0) + '–' + tradeClock(NET_SESSION) + '</span></div>' +
+      '<div class="small muted" id="net-parts" data-cash="' + (N.cashT || 0) + '">today: premiums ' + sg(N.colT || 0) + ' · cash paid for cash-ins ' + sg(-(N.cashT || 0)) + ' · shares taken in, at market ' + sg(N.mvT || 0) + '</div>' +
       '<div class="net-row"><div class="net-lines">' +
       row('net-today', 'Net', 'premiums − cash paid + shares at market', N.net) +
       row('net-after', 'After open exposure', 'if every open policy cashed in now', N.aft) +
@@ -528,6 +534,9 @@
   }
   function confBody(r) {
     var C = window.PCConfidence, T = r.T, v = r.index, d = v - state.conf.open;
+    // p11: small cash-in rates (one or two of 503 names below K) used to round to "0%"
+    function pctTxt(x) { var p = x * 100; return p > 0 && p < 10 ? (p < 0.1 ? '<0.1' : p.toFixed(1)) + '%' : Math.round(p) + '%'; }
+    var belowN = r.legs.filter(function (l) { return l.S < l.K; }).length;
     var gauge = '<div class="conf-gauge">' + C.BANDS.map(function (bd) { return '<span class="' + (r.band === bd[2] ? 'on' : '') + '" style="width:20%">' + bd[2] + '</span>'; }).join('') +
       '<i style="left:' + Math.min(99, Math.max(1, v)) + '%"></i></div>';
     var h = confHist.length > 1 ? confHist : [v, v], n = h.length;
@@ -538,12 +547,15 @@
     if (!B.status) { B.ok = 'ok'; B.status = 'Collecting…'; B.net = 0; }
     var B = confBook || window.PCConfidence.newBook();
     if (!B.status) { B.ok = 'ok'; B.status = 'Collecting…'; B.net = 0; }
+    // p11: the crowd book counts expected (fractional) policies; a first cash-in below 1 policy is shown as "<1", not "0"
+    function polTxt(x) { return x > 0 && x < 1 ? '<1' : Math.round(x).toLocaleString(); }
+    var tksN = Object.keys(B.inv || {}).filter(function (t) { return B.inv[t].sh > 0; }).length;
     function sg(x) { return (x >= 0 ? '+' : '−') + m(Math.abs(x)); }
     var res = '<div class="conf-res"><div class="row between"><b>Paracord resilience · this session</b><span class="small muted">demo book · ' + Math.round(B.minutes) + ' sim-min</span></div>' +
       '<div class="conf-status ' + B.ok + '">' + (B.ok === 'ok' ? '✓ ' : '✕ ') + B.status + '</div>' +
       '<div class="grid2" style="margin-top:8px">' +
       '<div class="stat"><div class="k">Cash in · premiums</div><div class="v" id="conf-prem">' + m(B.collected) + '</div><div class="small muted">collected so far · incl. ' + m(B.reserve) + ' surge reserve</div></div>' +
-      '<div class="stat"><div class="k">Cash out · cash-in purchases</div><div class="v" id="conf-paid">' + m(B.cashOut) + '</div><div class="small muted">paid K × shares · ' + Math.round(B.cashedPol).toLocaleString() + ' policies</div></div>' +
+      '<div class="stat"><div class="k">Cash out · cash-in purchases</div><div class="v" id="conf-paid">' + m(B.cashOut) + '</div><div class="small muted">paid K × shares · ' + polTxt(B.cashedPol) + ' policies · ' + tksN + ' name' + (tksN === 1 ? '' : 's') + '</div></div>' +
       '<div class="stat"><div class="k">Stock inventory</div><div class="v" id="conf-inv">' + m(B.invValue) + '</div><div class="small muted">market value now · cost ' + m(B.invCost) + '</div></div>' +
       '<div class="stat"><div class="k">Membership fees · non-refundable</div><div class="v" id="conf-memb">' + m(B.membership || 0) + '</div><div class="small muted">' + Math.round(B.members || 0).toLocaleString() + ' members × $' + (B.fee || RC.MEMBERSHIP_FEE) + ' annual, paid up front · kept, no refund liability</div></div>' +
       '<div class="stat"><div class="k">Open exposure</div><div class="v" id="conf-open">' + m(B.open) + '</div><div class="small muted">loss if all ' + Math.round(B.openPol).toLocaleString() + ' open policies cashed in now (cash needed ' + m(B.openCash) + ')</div></div>' +
@@ -551,7 +563,7 @@
       '<div class="small muted" style="margin-top:4px">Net position = premiums + membership fees − cash paid + inventory at market · net today = premiums − cash paid + market value of shares taken in, all for today (membership fees left out: they are one-off), with its peak and low over the simulated trading day (390 sim-min, 9:30–4:00; resets each new sim day and on page load); after open exposure = net today − open exposure · rates locked at start (v4) · status: net position vs open exposure (surge reserve ' + m(B.reserve) + ', target ' + m(T.target) + ') · firm limit use ' + Math.round((T.firmUtil || 0) * 100) + '%, worst sector ' + Math.round((T.sectorUtilMax || 0) * 100) + '%, book stress ' + (T.stress || 0).toFixed(2) + (T.M > 1 ? ' → surge ×' + T.M.toFixed(2) + ' on new locks' : '') + ', ' + Math.round(T.wait).toLocaleString() + ' waiting · resets on page load · scenarios change rates going forward, not past collections · nothing auto-sells</div></div>';
     return '<div class="conf-top"><div><div class="big conf-num">' + v.toFixed(0) + '</div>' +
       '<div class="small"><b>' + r.band + '</b> · <span class="' + (d >= 0 ? 'up' : 'down') + '">' + (d >= 0 ? '+' : '−') + Math.abs(d).toFixed(1) + ' vs open</span></div></div>' + spark + '</div>' + gauge +
-      '<div class="small muted conf-drv">Insured ' + Math.round(r.pIns * 100) + '% of users · cash-ins ' + Math.round(r.cashRate * 100) + '% · waiting/surge ' + Math.round(r.lineRate * 100) + '% · market ' + (r.mkt >= 0 ? '+' : '−') + Math.abs(r.mkt).toFixed(1) + 'σ · news H ' + r.H.toFixed(2) + '</div>' + movesHtml(r) + res;
+      '<div class="small muted conf-drv">Insured ' + Math.round(r.pIns * 100) + '% of users · cash-ins ' + pctTxt(r.cashRate) + ' (' + belowN + ' name' + (belowN === 1 ? '' : 's') + ' below K) · waiting/surge ' + Math.round(r.lineRate * 100) + '% · market ' + (r.mkt >= 0 ? '+' : '−') + Math.abs(r.mkt).toFixed(1) + 'σ · news H ' + r.H.toFixed(2) + '</div>' + movesHtml(r) + res;
   }
   function movesHtml(r) {
     if (!r.moves) return '';

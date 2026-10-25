@@ -9,6 +9,7 @@
   var TICKS_PER_YEAR = 252 * 390; // 1 tick ≈ 1 trading minute (demo acceleration)
   var VOL_WINDOW = 60, HIST = 180;
   var LAMBDA = Math.pow(0.5, 1 / 30); // EWMA decay for a 30-tick (≈30 sim-minute) half-life
+  var PULL = 0.0005; // p11: mean-reversion speed per tick (keeps ~91% of a sim day's sigma; long sessions stay near p0)
 
   function randn() {
     var u = 0, v = 0;
@@ -51,7 +52,10 @@
       var z = st.a * zm + st.c * zs[st.sec] + st.e * randn();
       // scenario: eased drift toward a_i * x * daily sigma_i (regression-implied move for an x-sigma market day)
       var target = st.a * sc * d.vol / Math.sqrt(252), dr = (target - st.scen) * 0.15; st.scen += dr;
-      var pull = 0.003 * (Math.log(d.p0 / st.price) + st.scen);  // mild mean reversion toward p0 x scenario shift
+      // p11: weak mean reversion toward p0 x scenario shift (half-life ~3.5 sim days). p9/p10 used 0.003/tick (~230-tick
+      // half-life), which squeezed a 390-tick sim day to ~0.62 of its daily sigma (38% of the variance), so almost no name
+      // ever got 5% below the open (the crowd's cash-in line) on a Normal day and Panic took a long time to produce any.
+      var pull = PULL * (Math.log(d.p0 / st.price) + st.scen);
       var np = Math.max(0.5, st.price * Math.exp(sig * z - 0.5 * sig * sig + pull + dr));
       var lr = Math.log(np / st.price);
       st.rets.push(lr); if (st.rets.length > VOL_WINDOW) st.rets.shift();
@@ -78,6 +82,7 @@
     var st = this.s[t]; return Math.sqrt(st.ewVar) < st.def.vol20 / Math.sqrt(TICKS_PER_YEAR);
   };
   Sim.TICKS_PER_YEAR = TICKS_PER_YEAR;
+  Sim.PULL = PULL;
   Sim.prototype.price = function (t) { return this.s[t].price; };
   Sim.prototype.hist = function (t) { return this.s[t].hist; };
   Sim.prototype.has = function (t) { return !!this.s[t]; };
