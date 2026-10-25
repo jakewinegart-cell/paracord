@@ -8,6 +8,7 @@
   var C = g.PARACORD_RATE_CONSTANTS;
   var KEY = 'paracord-proj-v1';
   var MIN_PER_YEAR = 252 * 390;
+  var COVERAGE_OPTS = [0.25, 0.5, 0.75, 1];   // p3 coverage-length toggle: fraction of the trading-session window held
   var P = {              // v3 constants (EXAMPLE values from the md)
     q: 0.01,             // Q_max = 1% of float
     nearCap: 0.90, hardStop: 1.25, nearCapMaxOrder: 0.005,
@@ -66,8 +67,12 @@
     var Qmax = P.q * d.float;
     var f = fill(I.users, n, Qmax, I.surgePct / 100);
     var insured = f.normal + f.surge, insShares = f.Qn + f.Qs;
-    var m = I.hours * 60;
-    var discEligible = I.overnight && I.hours >= 6.5;       // unbroken 24h block needs day + night coverage
+    // Coverage length (p3): users hold coverage for only this fraction of the insured trading-session window.
+    // Billed minutes (and so premium) scale linearly; overnight is a separate nightly price and is NOT scaled.
+    var cov = COVERAGE_OPTS.indexOf(+I.coverage) >= 0 ? +I.coverage : 1;
+    var mFull = I.hours * 60;
+    var m = mFull * cov;                                    // covered (billed) minutes per trading day
+    var discEligible = I.overnight && I.hours >= 6.5 && cov >= 1; // unbroken 24h block needs full day + night coverage
     var dfac = discEligible ? 1 - (1 - C.D_full_day) * I.fullDay / 100 : 1;
     // ---- day ----
     var dayBase = insured * base * m * dfac;
@@ -91,7 +96,7 @@
     var reservePays = Math.min(reserve, surgeTail);
     return {
       t: t, S: S, K: K, n: n, sigma1: sigma1, b: b, base: base, Qmax: Qmax, f: f, insured: insured, insShares: insShares,
-      m: m, dfac: dfac, discEligible: discEligible,
+      m: m, mFull: mFull, cov: cov, dfac: dfac, discEligible: discEligible,
       dayBase: dayBase, dayUplift: dayUplift, dayPrem: dayPrem, dayLoss: dayLoss, dayProfit: dayPrem - dayLoss, lossPerPolicyDay: lossPerPolicyDay,
       np: np, nightPrem: nightPrem, nightUplift: nightUplift, nightLoss: nightLoss, nightProfit: nightPrem - nightLoss,
       tail: tail, tailPerShare: tailPerShare, badNight: nightPrem - tail, reserve: reserve, reserveTarget: reserveTarget,
@@ -114,7 +119,7 @@
   }
 
   /* ---------------- inputs ---------------- */
-  var DEF = { users: 1000, stock: 'MOON', shares: 100, cushion: 0, hours: 6.5, overnight: false, news: 0, fullDay: 50, surgePct: 50 };
+  var DEF = { users: 1000, stock: 'MOON', shares: 100, cushion: 0, hours: 6.5, overnight: false, news: 0, fullDay: 50, surgePct: 50, coverage: 1 };
   var I;
   try { I = Object.assign({}, DEF, JSON.parse(localStorage.getItem(KEY)) || {}); } catch (e) { I = Object.assign({}, DEF); }
   function save() { try { localStorage.setItem(KEY, JSON.stringify(I)); } catch (e) {} }
@@ -152,10 +157,21 @@
       '<div class="pj-card"><h3 class="pj-h">Inputs</h3>' +
       '<div class="pj-field"><div class="pj-flabel"><span>Stock</span></div>' + segHtml('stock', [['COP', 'COP'], ['WMT', 'WMT'], ['NVDA', 'NVDA'], ['MOON', 'MOON'], ['ALL', 'All four']]) + '</div>' +
       FIELDS.slice(0, 4).map(fieldHtml).join('') +
+      '<div class="pj-field" id="pj-coverage"><div class="pj-flabel"><span>Coverage length (share of trading day held)</span></div>' +
+      segHtml('coverage', COVERAGE_OPTS.map(function (c) { return [c, Math.round(c * 100) + '%']; })) +
+      '<div class="pj-sub pj-covnote" id="pj-covnote">' + covNote() + '</div></div>' +
       '<div class="pj-field"><div class="pj-flabel"><span>Include overnight coverage</span></div>' + segHtml('overnight', [[false, 'No'], [true, 'Yes']]) + '</div>' +
       FIELDS.slice(4).map(fieldHtml).join('') +
+      '<div class="pj-sub pj-exercise">Optional exercise: the cushion (K) is only the line where users <b>may</b> cash in. Nothing is sold automatically, and users can keep insurance on indefinitely.</div>' +
       '<button class="pj-btn ghost" data-pact="reset">Reset inputs</button></div>' +
       '<div id="pj-out">' + outHtml() + '</div></div>';
+  }
+
+  function covNote() {
+    var cov = +I.coverage || 1, h = I.hours * cov;
+    return 'Applies to the trading-session hours above: covered time = ' + I.hours + ' h × ' + Math.round(cov * 100) + '% = ' +
+      (Math.round(h * 100) / 100) + ' h (' + Math.round(h * 60) + ' billed min). Premium scales linearly with billed minutes; expected payouts scale with √time. ' +
+      'Overnight stays a separate nightly price and is not affected' + (cov < 1 ? '; the 10% full-24h discount needs 100% coverage.' : '.');
   }
 
   /* ---------------- outputs ---------------- */
@@ -176,10 +192,10 @@
   function outHtml() {
     var pr = project(I), T = pr.tot, rows = pr.rows, multi = rows.length > 1;
     var h = '<div class="pj-card"><h3 class="pj-h">Capacity &amp; waiting line <span class="pj-mini">Projection — demo inputs</span></h3>' + rows.map(capBar).join('') + '</div>';
-    h += '<div class="pj-card"><h3 class="pj-h">' + (multi ? 'Totals · all four' : rows[0].t + ' · per trading day') + ' <span class="pj-mini">Projection — demo inputs</span></h3><div class="pj-kpis">' +
-      kpi('Premium / day', money(T.dayPrem), 'incl. ' + money(T.dayUplift) + ' surge uplift') +
+    h += '<div class="pj-card"><h3 class="pj-h">' + (multi ? 'Totals · all four' : rows[0].t + ' · per trading day') + ' · ' + Math.round(rows[0].cov * 100) + '% coverage <span class="pj-mini">Projection — demo inputs</span></h3><div class="pj-kpis">' +
+      kpi('Premium / day', money(T.dayPrem), 'incl. ' + money(T.dayUplift) + ' surge uplift · ' + num(rows[0].m) + ' covered min') +
       kpi('Premium / night', I.overnight ? money(T.nightPrem) : '—', I.overnight ? 'lump, 1 night' : 'overnight off') +
-      kpi('Expected loss', money(T.dayLoss + T.nightLoss), 'day ' + money(T.dayLoss) + (I.overnight ? ' · night ' + money(T.nightLoss) : '')) +
+      kpi('Expected payouts', money(T.dayLoss + T.nightLoss), 'day ' + money(T.dayLoss) + (I.overnight ? ' · night ' + money(T.nightLoss) : '')) +
       kpi('Expected profit / day', signed(T.dayProfit), null, cls(T.dayProfit)) +
       kpi('Expected profit / night', I.overnight ? signed(T.nightProfit) : '—', null, cls(T.nightProfit)) +
       kpi('Expected profit / share', signed(T.perShare, 4), 'per insured share, day + night', cls(T.perShare)) +
@@ -197,12 +213,12 @@
       var b = r.b;
       return '<div class="pj-bd"><div class="pj-bdh">' + r.t + ' · S ' + money(r.S, 2) + ' · K ' + money(r.K, 2) + ' · ' + r.n + ' sh/user</div>' +
         '<div class="pj-formula">Base = clamp(0.0029 × E ' + money(b.E, 2) + ' × L ' + b.L.toFixed(3) + ' × (1+3×' + I.news.toFixed(2) + '), $0.02, $6) = ' + money(r.base, 4) + '/min' + (b.clampedTo ? ' (' + b.clampedTo + ')' : '') + '</div>' +
-        line('Base rate × minutes × insured users', money(r.base, 4) + ' × ' + num(r.m) + ' × ' + num(r.insured)) +
-        line('× full-day discount factor (base only)', r.dfac.toFixed(3) + (r.discEligible ? '' : ' (needs overnight + 6.5 h)')) +
+        line('Base rate × covered minutes × insured users', money(r.base, 4) + ' × ' + num(r.m) + (r.cov < 1 ? ' (' + num(r.mFull) + ' × ' + Math.round(r.cov * 100) + '%)' : '') + ' × ' + num(r.insured)) +
+        line('× full-day discount factor (base only)', r.dfac.toFixed(3) + (r.discEligible ? '' : ' (needs overnight + 6.5 h + 100% coverage)')) +
         line('= base premium / day', money(r.dayBase)) +
         line('+ surge uplift (Base × (M−1) × min) → reserve', money(r.dayUplift)) +
         line('= premium / day', money(r.dayPrem), 'em') +
-        line('− expected loss / day (G(z) over ' + I.hours + ' h)', '−' + money(r.dayLoss)) +
+        line('− expected payouts / day (G(z), σ ∝ √' + (Math.round(r.m / 60 * 100) / 100) + ' h covered)', '−' + money(r.dayLoss)) +
         line('= expected profit / day', '<span class="' + cls(r.dayProfit) + '">' + signed(r.dayProfit) + '</span>', 'em') +
         (I.overnight ?
           line('Night price / policy = 1.12 × E_night ' + money(r.np.E, 2) + ' × L × (1+3H)', money(r.np.premium, 2) + ' (≈ ' + money(r.np.perHour, 2) + '/h from close)') +
@@ -224,7 +240,9 @@
       '<li>"All four": every user insures the chosen shares in each stock; each stock has its own pool. Totals add stocks; the bad-gap total assumes all four gap down together.</li>' +
       '<li>Expected loss uses the md\'s normal model: N·S·σ·G(z) with σ = σ₁·√(minutes insured) by day and σ_gap = σ_annual/√252 (= IM/0.798) overnight. News is assumed to raise realized vol by (1+H) for losses; the premium uses (1+3H).</li>' +
       '<li>Overnight = one normal weeknight (T_c 17.5 h, no event), option (a) lump premium, capped at $360/h × 17.5 h before surge. No floor overnight.</li>' +
-      '<li>10% off applies to base (day and night) only, and only when overnight is on and hours = 6.5, since D needs an unbroken 24 h block.</li>' +
+      '<li>10% off applies to base (day and night) only, and only when overnight is on, hours = 6.5 and coverage = 100%, since D needs an unbroken 24 h block.</li>' +
+      '<li>Coverage length: insured users hold coverage for 25/50/75/100% of the insured session hours. Premium (base and surge uplift) is linear in billed minutes; expected payouts use σ₁·√(covered minutes), so they shrink only with √time — partial-day coverage earns proportionally less premium than it saves in payouts and can look underpriced. The pricing formula itself is unchanged. Overnight price, tail and reserve target are not scaled.</li>' +
+      '<li>Optional exercise: K is only the level where users may cash in. No automatic sell and no coverage end at K; payouts are modeled as expected shortfall below K at the end of each covered window (users who keep coverage roll into the next window).</li>' +
       '<li>Reserve = one day\'s surge uplift (day + night). No queue promotion, offer windows, cash-outs or intraday payouts are simulated.</li></ul></details>' +
       '<div class="pj-foot">Projection — demo inputs. Not a forecast, quote, or approved rate.</div>';
     return h;
@@ -240,6 +258,7 @@
     var n = document.getElementById('pj-n-' + k), r = document.getElementById('pj-r-' + k);
     if (n && src !== n) n.value = v;
     if (r && src !== r) r.value = toSlider(f, v);
+    var cn = document.getElementById('pj-covnote'); if (cn) cn.innerHTML = covNote();
     refresh();
   }
   document.addEventListener('input', function (e) {
@@ -252,13 +271,14 @@
   document.addEventListener('click', function (e) {
     var s = e.target.closest('[data-pseg]');
     if (s) {
-      var k = s.dataset.pseg, v = s.dataset.pv; I[k] = k === 'overnight' ? v === 'true' : v;
+      var k = s.dataset.pseg, v = s.dataset.pv; I[k] = k === 'overnight' ? v === 'true' : k === 'coverage' ? +v : v;
       s.parentNode.querySelectorAll('button').forEach(function (b) { b.classList.toggle('on', b === s); });
+      var cn = document.getElementById('pj-covnote'); if (cn) cn.innerHTML = covNote();
       refresh(); return;
     }
     var a = e.target.closest('[data-pact="reset"]');
     if (a) { I = Object.assign({}, DEF); save(); var root = document.getElementById('pj-root'); if (root) root.outerHTML = view(); }
   });
 
-  g.PCProjections = { view: view, project: project, projectStock: projectStock, fill: fill, surgeMultiplier: surgeMultiplier, nightPremium: nightPremium, inputs: function () { return I; }, constants: P };
+  g.PCProjections = { view: view, project: project, projectStock: projectStock, fill: fill, surgeMultiplier: surgeMultiplier, nightPremium: nightPremium, inputs: function () { return I; }, constants: P, coverageOptions: COVERAGE_OPTS };
 })(window);

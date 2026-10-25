@@ -58,3 +58,5 @@
 .pj-assume summary{cursor:pointer;min-height:44px;display:flex;align-items:center;font-weight:800}
 .pj-assume ul{padding-left:18px;margin:6px 0 0}.pj-assume li{margin:5px 0}
 .pj-foot{text-align:center;color:var(--muted);font-size:11.5px;margin:14px 0 4px}
+.pj-covnote{margin-top:6px;line-height:1.35}
+.pj-exercise{margin-top:10px;padding:9px 10px;border:1px solid var(--line);border-radius:10px;background:var(--panel2);line-height:1.35}
