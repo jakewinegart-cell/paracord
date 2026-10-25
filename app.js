@@ -194,9 +194,9 @@
 
   function discountCard(t) {
     return '<div class="card"><h3>Full-day discount</h3><div class="row" style="gap:14px">' +
-      '<svg class="ring" viewBox="0 0 84 84"><circle cx="42" cy="42" r="34" fill="none" stroke="#26304f" stroke-width="9"/>' +
-      '<circle data-live="ring:' + t + '" cx="42" cy="42" r="34" fill="none" stroke="#22d3a6" stroke-width="9" stroke-linecap="round" transform="rotate(-90 42 42)" stroke-dasharray="213.6" stroke-dashoffset="213.6"/>' +
-      '<text data-live="ringpct:' + t + '" x="42" y="47" text-anchor="middle" fill="#eef2ff" font-size="15" font-weight="800"></text></svg>' +
+      '<svg class="ring" viewBox="0 0 84 84"><circle cx="42" cy="42" r="34" fill="none" stroke="#d6d6d6" stroke-width="9"/>' +
+      '<circle data-live="ring:' + t + '" cx="42" cy="42" r="34" fill="none" stroke="#c8102e" stroke-width="9" stroke-linecap="round" transform="rotate(-90 42 42)" stroke-dasharray="213.6" stroke-dashoffset="213.6"/>' +
+      '<text data-live="ringpct:' + t + '" x="42" y="47" text-anchor="middle" fill="#111111" font-size="15" font-weight="800"></text></svg>' +
       '<div style="flex:1"><div data-live="discount:' + t + '"></div><div class="small muted" style="margin-top:4px">Keep insurance on for a full, unbroken 24h to get 10% off that day\'s charges (D<sub>t</sub> = 0.90).</div>' +
       '<div class="row" style="margin-top:8px;gap:6px"><button class="btn sm ghost" data-act="skip" data-ms="3600000">⏩ +1h</button><button class="btn sm ghost" data-act="skip" data-ms="' + DAY + '">⏩ +24h</button></div></div></div></div>';
   }
@@ -214,7 +214,7 @@
       '<div style="text-align:right"><span class="pill vol">' + d.tag + '</span><div class="small muted" style="margin-top:6px" data-live="vol:' + t + '"></div></div></div>' +
       '<div class="small muted" style="margin:4px 0 10px">Simulated price · updates every second</div>' +
       '<canvas class="chart" id="chart" data-t="' + t + '"></canvas>' +
-      '<div class="row small muted" style="margin:6px 2px 12px;gap:14px"><span><span style="color:' + d.color + '">━</span> price (sim)</span>' + (state.ins[t] ? '<span><span style="color:#22d3a6">╍</span> lock-in</span>' : '') + '</div>' +
+      '<div class="row small muted" style="margin:6px 2px 12px;gap:14px"><span><span style="color:' + d.color + '">━</span> price (sim)</span>' + (state.ins[t] ? '<span><span style="color:#c8102e">╍</span> lock-in</span>' : '') + '</div>' +
       '<div class="card"><h3>Your holding</h3><div class="grid2"><div class="stat"><div class="k">Shares</div><div class="v">' + n + '</div></div>' +
       '<div class="stat"><div class="k">Value</div><div class="v" data-live="value:' + t + '"></div></div></div>' +
       '<div class="badges" style="margin-top:10px">' + state.holdings.filter(function (h) { return h.t === t && h.sh > 0 && state.linked.indexOf(h.acct) >= 0; }).map(function (h) { return bb(h.acct) + '<span class="small muted" style="align-self:center">' + h.sh + ' sh</span>'; }).join('') + '</div></div>' +
@@ -268,9 +268,9 @@
     if (route.sheet === 'link-approve') {
       var b = BY_B[route.b];
       return '<div class="oauth"><div class="url">🔒 demo-auth.' + b.id + '.example/authorize (simulated)</div><div class="body">' +
-        '<div class="pair"><div class="lg" style="background:' + b.color + '">' + b.short + '</div><span style="font-size:22px">⇄</span><div class="lg" style="background:linear-gradient(135deg,#7c5cff,#22d3a6)">⟆</div></div>' +
-        '<h2 class="center" style="color:#0f172a">Paracord (Demo) wants to connect to your ' + b.name + ' demo account</h2>' +
-        '<div class="small" style="color:#475569">Signed in as <b>Demo User</b> (simulated)</div>' +
+        '<div class="pair"><div class="lg" style="background:' + b.color + '">' + b.short + '</div><span style="font-size:22px">⇄</span><div class="lg" style="background:#111111">⟆</div></div>' +
+        '<h2 class="center" style="color:#111111">Paracord (Demo) wants to connect to your ' + b.name + ' demo account</h2>' +
+        '<div class="small" style="color:#5c5c5c">Signed in as <b>Demo User</b> (simulated)</div>' +
         '<ul class="small"><li>View holdings &amp; share counts (read-only, simulated)</li><li>No trading, no transfers, no money movement</li></ul>' +
         '<div class="note"><b>DEMO:</b> No password or credentials are requested. This screen imitates an OAuth approval — nothing connects to ' + b.name + '.</div>' +
         '<button class="btn" data-act="approve" data-b="' + b.id + '">Approve demo link</button><button class="btn ghost" data-act="close-sheet">Deny</button></div></div>';
@@ -297,7 +297,7 @@
       var r = state.receipts.filter(function (x) { return x.ref === route.ref; })[0];
       if (!r) return '<div class="card">Receipt not found.</div>';
       return '<div class="demo-tag" style="display:block;text-align:center">DEMO — no real trade</div><div class="check">✓</div><h2 class="center" style="margin:0">Cash-out complete (demo)</h2>' +
-        '<p class="center muted small">Ref <b class="num" style="color:#eef2ff">' + r.ref + '</b><br>' + new Date(r.at).toLocaleString() + ' (sim clock)</p>' +
+        '<p class="center muted small">Ref <b class="num" style="color:#111111">' + r.ref + '</b><br>' + new Date(r.at).toLocaleString() + ' (sim clock)</p>' +
         '<div class="card">' + kv('Stock', r.t + ' · ' + BY_T[r.t].name.replace(/ \(.*\)/, '')) + kv('Shares sold to Paracord', r.n) + kv('Lock-in price', money(r.K, 2)) + kv('Market price at execution', money(r.S, 2)) +
         kv('Payout', money(r.payout, 2)) + kv('Insurance cost settled', '−' + money(r.cost)) + kv('Net', money(r.net, 2), 'total') + kv('vs selling at market', '<span class="' + cls(r.payout - r.market) + '">' + signed(r.payout - r.market) + '</span>') + '</div>' +
         '<div class="small muted center" style="margin-bottom:12px">Simulated receipt. No shares moved and no money was paid.</div><button class="btn" data-act="receipt-done">Done</button>';
@@ -307,7 +307,7 @@
     var n = Math.min(route.n || ins.shares, ins.shares);
     if (route.step === 'confirm') {
       return '<div class="demo-tag" style="display:block;text-align:center">DEMO — no real trade</div>' +
-        '<div class="card center" style="margin-top:12px"><div class="small muted">You\'re selling to Paracord</div><div class="big">' + n + ' ' + t + '</div><div class="muted">at lock-in <b style="color:#eef2ff">' + money(ins.lockIn, 2) + '</b> / share</div></div>' +
+        '<div class="card center" style="margin-top:12px"><div class="small muted">You\'re selling to Paracord</div><div class="big">' + n + ' ' + t + '</div><div class="muted">at lock-in <b style="color:#111111">' + money(ins.lockIn, 2) + '</b> / share</div></div>' +
         '<div class="card" id="cosum">' + coRows(t, n) + '</div>' +
         '<div class="card small muted">By confirming, the demo will reduce your simulated ' + t + ' holding by ' + n + ' shares and settle the pro-rated insurance cost. Nothing is sent to any brokerage.</div>' +
         '<button class="btn mint" data-act="co-confirm">Confirm demo cash-out</button><button class="btn ghost" data-act="back">Cancel</button>';
@@ -400,8 +400,8 @@
   function live() {
     document.querySelectorAll('[data-live]').forEach(function (el) {
       var k = el.getAttribute('data-live').split(':'), kind = k[0], t = k[1];
-      if (kind === 'spark') { el.setAttribute('points', sparkPts(t)); el.setAttribute('stroke', chg(t) >= 0 ? '#22c55e' : '#f43f5e'); return; }
-      if (kind === 'ring') { var ins = state.ins[t]; if (ins) el.setAttribute('stroke-dashoffset', (213.6 * (1 - (ins.blocksDone ? 1 : prog(ins)))).toFixed(1)); if (ins && ins.blocksDone) el.setAttribute('stroke', '#f59e0b'); return; }
+      if (kind === 'spark') { el.setAttribute('points', sparkPts(t)); el.setAttribute('stroke', chg(t) >= 0 ? '#111111' : '#c8102e'); return; }
+      if (kind === 'ring') { var ins = state.ins[t]; if (ins) el.setAttribute('stroke-dashoffset', (213.6 * (1 - (ins.blocksDone ? 1 : prog(ins)))).toFixed(1)); if (ins && ins.blocksDone) el.setAttribute('stroke', '#111111'); return; }
       var v = liveVal(kind, t, el);
       if (el.innerHTML !== v) el.innerHTML = v;
     });
@@ -426,9 +426,9 @@
     var L = 8, R = 58, T = 10, B = 14;
     function X(i) { return L + i * (w - L - R) / (data.length - 1); }
     function Y(p) { return T + (mx - p) / (mx - mn) * (h - T - B); }
-    g.strokeStyle = '#1f2947'; g.lineWidth = 1; g.fillStyle = '#6b7799'; g.font = '11px sans-serif';
+    g.strokeStyle = '#e6e6e6'; g.lineWidth = 1; g.fillStyle = '#5c5c5c'; g.font = '11px sans-serif';
     for (var k = 0; k <= 3; k++) { var p = mn + (mx - mn) * k / 3, y = Y(p); g.beginPath(); g.moveTo(L, y); g.lineTo(w - R, y); g.stroke(); g.fillText(p.toFixed(2), w - R + 6, y + 4); }
-    if (ins) { var ly = Y(ins.lockIn); g.fillStyle = 'rgba(34,211,166,.08)'; g.fillRect(L, ly, w - L - R, h - B - ly); }
+    if (ins) { var ly = Y(ins.lockIn); g.fillStyle = 'rgba(200,16,46,.06)'; g.fillRect(L, ly, w - L - R, h - B - ly); }
     var col = BY_T[t].color, grad = g.createLinearGradient(0, T, 0, h);
     grad.addColorStop(0, col + '55'); grad.addColorStop(1, col + '00');
     g.beginPath(); data.forEach(function (p, i) { i ? g.lineTo(X(i), Y(p)) : g.moveTo(X(i), Y(p)); });
@@ -436,8 +436,8 @@
     g.beginPath(); data.forEach(function (p, i) { i ? g.lineTo(X(i), Y(p)) : g.moveTo(X(i), Y(p)); }); g.strokeStyle = col; g.lineWidth = 2; g.stroke();
     var lx = X(data.length - 1), lyy = Y(data[data.length - 1]); g.fillStyle = col; g.beginPath(); g.arc(lx, lyy, 4, 0, 7); g.fill();
     if (ins) {
-      var y2 = Y(ins.lockIn); g.setLineDash([6, 5]); g.strokeStyle = '#22d3a6'; g.lineWidth = 2; g.beginPath(); g.moveTo(L, y2); g.lineTo(w - R, y2); g.stroke(); g.setLineDash([]);
-      g.fillStyle = '#22d3a6'; g.fillRect(w - R + 2, y2 - 9, R - 4, 18); g.fillStyle = '#04241c'; g.font = 'bold 11px sans-serif'; g.fillText('K ' + ins.lockIn.toFixed(2), w - R + 5, y2 + 4);
+      var y2 = Y(ins.lockIn); g.setLineDash([6, 5]); g.strokeStyle = '#c8102e'; g.lineWidth = 2; g.beginPath(); g.moveTo(L, y2); g.lineTo(w - R, y2); g.stroke(); g.setLineDash([]);
+      g.fillStyle = '#c8102e'; g.fillRect(w - R + 2, y2 - 9, R - 4, 18); g.fillStyle = '#ffffff'; g.font = 'bold 11px sans-serif'; g.fillText('K ' + ins.lockIn.toFixed(2), w - R + 5, y2 + 4);
     }
   }
 
