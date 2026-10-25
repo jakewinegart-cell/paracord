@@ -1,0 +1,71 @@
+/* Paracord — Projections tab (additive). All selectors are pj- prefixed except the tab-count override below. */
+/* The only change to existing layout: the bottom tab bar gets a 5th column for the new tab. */
+.tabs{grid-template-columns:repeat(4,1fr)} /* tabs1: Insured tab folded into Portfolio */
+#pj-root{padding-bottom:10px}
+.pj-tag{display:inline-block;background:var(--panel2);color:var(--text);border:1px dashed #9a9a9a;border-radius:8px;padding:5px 9px;font-size:12px;font-weight:800;letter-spacing:.4px}
+.pj-intro{color:var(--muted);font-size:13px;margin:8px 2px 12px}
+.pj-card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin-bottom:12px}
+.pj-h{margin:0 0 12px;font-size:14px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.pj-mini{margin-left:auto;font-size:10px;font-weight:800;color:var(--muted);text-transform:none;letter-spacing:0;border:1px dashed #b5b5b5;border-radius:6px;padding:2px 6px}
+.pj-field{padding:8px 0 10px;border-bottom:1px solid var(--line)}
+.pj-field:last-of-type{border-bottom:0}
+.pj-flabel{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:14px;font-weight:600;margin-bottom:6px}
+.pj-numwrap{display:flex;align-items:center;gap:4px;flex:none}
+.pj-num{width:104px;height:46px;border-radius:12px;border:1px solid var(--line);background:#ffffff;color:var(--text);text-align:right;padding:0 10px;font-size:17px;font-weight:800;font-variant-numeric:tabular-nums}
+.pj-unit{color:var(--muted);font-weight:700;min-width:14px}
+.pj-range{width:100%;height:40px;accent-color:var(--accent)}
+.pj-seg{display:grid;grid-template-columns:repeat(auto-fit,minmax(56px,1fr));gap:6px;background:var(--panel2);padding:4px;border-radius:12px}
+.pj-seg button{min-height:46px;border:0;border-radius:9px;background:transparent;color:var(--muted);font-weight:800;font-size:13.5px;padding:0 2px}
+.pj-seg button.on{background:var(--accent);color:var(--accent-ink)}
+.pj-btn{display:flex;align-items:center;justify-content:center;width:100%;min-height:48px;border-radius:14px;margin-top:12px;font-weight:700;font-size:15px}
+.pj-btn.ghost{background:transparent;border:1px solid var(--line);color:var(--text)}
+.pj-cap{padding:6px 0 12px;border-bottom:1px solid var(--line);margin-bottom:10px}
+.pj-cap:last-child{border-bottom:0;margin-bottom:0}
+.pj-row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.pj-band{font-size:12px;font-weight:800;border-radius:999px;padding:4px 10px}
+.pj-band-open{background:#0000000d;color:#111111}.pj-band-near{background:#00000014;color:#333333}
+.pj-band-at{background:var(--accent-tint);color:var(--accent)}.pj-band-hard{background:var(--accent);color:#ffffff}
+.pj-bar{display:flex;height:22px;border-radius:8px;overflow:hidden;background:#ffffff;margin:10px 0 6px;border:1px solid var(--line)}
+.pj-bar span{display:block;height:100%}
+.pj-bar-n{background:#3a3a3a}.pj-bar-s{background:var(--accent)}
+.pj-bar-w{background:repeating-linear-gradient(45deg,#c9c9c9,#c9c9c9 6px,#e3e3e3 6px,#e3e3e3 12px)}
+.pj-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;font-variant-numeric:tabular-nums}
+.pj-dot{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+.pj-dot.n{background:#3a3a3a}.pj-dot.s{background:var(--accent)}.pj-dot.w{background:#c9c9c9}
+.pj-util{position:relative;height:8px;border-radius:9px;background:var(--panel2);margin:10px 0 6px;overflow:visible}
+.pj-util span{display:block;height:100%;border-radius:9px;background:linear-gradient(90deg,#9a9a9a,#5c5c5c 70%,var(--accent))}
+.pj-util em{position:absolute;top:-4px;width:2px;height:16px;background:#11111188}
+.pj-sub{color:var(--muted);font-size:12px}
+.pj-kpis{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.pj-kpi{background:var(--panel2);border-radius:14px;padding:12px;min-height:76px}
+.pj-kpi .k{font-size:12px;color:var(--muted)}
+.pj-kpi .v{font-size:19px;font-weight:800;font-variant-numeric:tabular-nums;word-break:break-word}
+.pj-table{font-size:12.5px;font-variant-numeric:tabular-nums}
+.pj-tr{display:grid;grid-template-columns:52px 1fr 1fr 1fr 1.1fr;gap:6px;padding:9px 0;border-bottom:1px solid var(--line);text-align:right}
+.pj-tr span:first-child{text-align:left}
+.pj-th{color:var(--muted);font-size:11px}
+.pj-tot{font-weight:800;border-bottom:0}
+.pj-bd{padding:4px 0 12px;border-bottom:1px solid var(--line);margin-bottom:10px}
+.pj-bd:last-child{border-bottom:0;margin-bottom:0}
+.pj-bdh{font-weight:800;margin-bottom:6px}
+.pj-formula{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;background:var(--panel2);border-radius:10px;padding:9px;color:#222222;margin-bottom:6px;word-break:break-word}
+.pj-line{display:flex;justify-content:space-between;gap:10px;padding:7px 0;font-size:13px;border-bottom:1px dashed #d6d6d6}
+.pj-line span{color:var(--muted)}
+.pj-line b{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.pj-line.em span{color:var(--text);font-weight:700}
+.pj-line.em b{font-size:15px}
+.pj-bad{margin-top:10px;background:var(--accent-tint);border:1px solid #c8102e44;border-radius:12px;padding:10px}
+.pj-assume summary{cursor:pointer;min-height:44px;display:flex;align-items:center;font-weight:800}
+.pj-assume ul{padding-left:18px;margin:6px 0 0}.pj-assume li{margin:5px 0}
+.pj-foot{text-align:center;color:var(--muted);font-size:11.5px;margin:14px 0 4px}
+.pj-covnote{margin-top:6px;line-height:1.35}
+.pj-exercise{margin-top:10px;padding:9px 10px;border:1px solid var(--line);border-radius:10px;background:var(--panel2);line-height:1.35}
+.pj-kpi:first-child .v,.pj-kpi:nth-child(4) .v:not(.down){color:var(--accent)}
+/* p8: long v4 breakdown values wrap instead of squeezing the label */
+.pj-line span{flex:1 1 45%;min-width:0}
+.pj-line b{flex:0 1 auto;max-width:58%;white-space:normal;overflow-wrap:anywhere}
+/* p12 membership plans */
+.pj-plans{grid-template-columns:1fr 1fr}
+.pj-plan{display:flex;align-items:center;justify-content:center;gap:6px;min-height:46px;border-radius:9px;background:#fff;color:var(--text);font-size:13.5px;font-weight:700}
+.pj-plan b{color:var(--accent)}
+#pj-member .pj-tr{grid-template-columns:1fr 1.2fr 1.3fr 1.3fr}
