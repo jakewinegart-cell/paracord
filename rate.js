@@ -22,12 +22,20 @@
  *     moves, vol moves and news do NOT reprice an existing lock. What still changes: the taper day n,
  *     the deterministic floor schedule, the 10% full-day discount (base part only), and anything the
  *     user changes (shares, K = a re-lock). Surge M is fixed at purchase (as in v3).
+ *  p9 (Stage 0, 2026-10-25):
+ *  4. Lock vol = max(recent realized vol, options-implied vol) per name (lockVol). The SAME vol sets the locked base rate
+ *     (sigma_1) and the 1.15x put floor, so the floor tracks the listed put even in calm weeks (p8 locked at realized vol
+ *     only and fell to ~0.2x the put in flat weeks). Implied vol carries an earnings bump when a known earnings date
+ *     falls inside the lock window: iv^2 = iv_base^2 + m^2 * 365 / window_days (m = 1-day event move, estimate).
+ *  5. Firm-wide $ limits replace the 1%-of-float pool: per name min(10% of the firm limit, 10% of daily $ volume),
+ *     per sector 25% of the firm limit, and a firm total (demo values). Surge is set by book-wide stress
+ *     (firm / sector utilisation + an index-stress signal), so a crash raises prices on all names together.
  *  Per-person caps (config): $5,000 insured value per stock and $25,000 total, insured value = K x shares,
  *  per verified person (identity/KYC), not per brokerage account.
  */
 (function (g) {
   var C = {
-    version: 4,
+    version: 4, build: 'p9',
     h: 390,            // look-ahead horizon, minutes
     c: 0.0029,         // per min: ~1.12 x (1/390), fair rate + 12% load
     beta: 3,           // full-severity news ~quadruples the rate (at lock)
@@ -48,7 +56,16 @@
     MIN_PER_YEAR: 252 * 390,
     CAP_PER_STOCK: 5000,   // $ insured value (K x shares) per person per stock
     CAP_TOTAL: 25000,      // $ insured value per person across all stocks
-    MEMBERSHIP_FEE: 99     // $/yr annual membership, paid up front, non-refundable (draft)
+    MEMBERSHIP_FEE: 99,    // $/yr annual membership, paid up front, non-refundable (draft)
+    // p9 lock vol
+    LOCK_WINDOW_DAYS: 28,  // look-ahead window for the earnings check when a lock has no fixed end (calendar days; 28 = 4 weeks = the 1-month listed put the floor is benchmarked against)
+    // p9 firm-wide limits on insured value (K x shares, $). DEMO values, illustrative only.
+    FIRM_LIMIT: 750e6,     // total insured value the firm will carry
+    SECTOR_SHARE: 0.25,    // max share of the firm limit in one GICS sector
+    NAME_SHARE: 0.10,      // max share of the firm limit in one name ...
+    NAME_ADDV: 0.10,       // ... and at most 10% of the name's average daily $ volume
+    NEAR_CAP: 0.90, HARD_STOP: 1.25, NEAR_CAP_MAX_ORDER: 0.005, // v3 queue bands, now in $ of the effective limit
+    STRESS_PER_SIGMA: 0.08 // book stress added per 1 sigma of index drop
   };
 
   function clamp(x, a, b) { return Math.min(b, Math.max(a, x)); }
@@ -173,6 +190,78 @@
     return Math.max(0, Math.min(held, Math.floor(room / K + 1e-9)));
   }
 
+
+  /* ---------------- p9: lock vol = max(recent realized, options-implied) ---------------- */
+  /**
+   * def: universe record { rv (recent realized, annual; default rv20), iv, iv_base, iv_win, earn (YYYY-MM-DD|null), earn_move }
+   * opt: { at: ms (lock time; default now), days: lock window in calendar days (default LOCK_WINDOW_DAYS), rv: override }
+   * Returns { used, rv, iv (incl. earnings bump), ivBase, earnInside, earnDate, bumpPts, source: 'implied'|'realized' }.
+   */
+  function lockVol(def, opt) {
+    opt = opt || {};
+    var rv = opt.rv != null ? +opt.rv : (def.rv != null ? +def.rv : +def.rv20 || 0);
+    var ivBase = def.iv_base != null ? +def.iv_base : +def.iv || 0, mv = +def.earn_move || 0;
+    var days = opt.days != null ? +opt.days : C.LOCK_WINDOW_DAYS, at = opt.at != null ? +opt.at : Date.now();
+    var inside = false, ed = null;
+    if (def.earn) {
+      ed = Date.parse(def.earn + 'T21:00:00Z');                   // report day (US close, UTC)
+      var dd = (ed - at) / 86400000; inside = dd > -0.5 && dd <= days;
+    }
+    var iv = Math.sqrt(ivBase * ivBase + (inside && days > 0 ? mv * mv * 365 / days : 0));
+    var used = Math.max(rv, iv);
+    return { used: used, rv: rv, iv: iv, ivBase: ivBase, earnInside: inside, earnDate: def.earn || null, bumpPts: iv - ivBase,
+      source: iv >= rv ? 'implied' : 'realized', ivSrc: def.iv_src || null, days: days };
+  }
+
+  /* ---------------- p9: firm-wide limits and book-stress surge ---------------- */
+  function nameLimit(def) { var a = +def.addv || (+def.adv_sh || 0) * (+def.px || 0); return Math.min(C.NAME_SHARE * C.FIRM_LIMIT, a > 0 ? C.NAME_ADDV * a : C.NAME_SHARE * C.FIRM_LIMIT); }
+  function sectorLimit() { return C.SECTOR_SHARE * C.FIRM_LIMIT; }
+  /** Book-wide stress: max(firm utilisation, worst sector utilisation) + STRESS_PER_SIGMA x index drop in sigma. */
+  function bookStress(firmUtil, sectorUtilMax, mktSigma) { return Math.max(firmUtil || 0, sectorUtilMax || 0) + C.STRESS_PER_SIGMA * Math.max(0, -(mktSigma || 0)); }
+  /** Surge multiplier from book stress s: 1.0 below 0.90; 1 -> 2 between 0.90 and 1.00; 2 + (s - 1)/0.25 up to 3.0 at 1.25. */
+  function surgeMultiplier(s) { s = +s || 0; if (s < C.NEAR_CAP) return 1; if (s < 1) return 1 + (s - C.NEAR_CAP) / (1 - C.NEAR_CAP); return 2 + (Math.min(s, C.HARD_STOP) - 1) / (C.HARD_STOP - 1); }
+  /**
+   * Allocate firm limits across names. items: [{ key, sector, demand ($ requested), cap (name limit $) }].
+   * Sector and firm limits are shared pro rata when demand exceeds them. Returns { lim: {key: effective $ limit},
+   * firmUtil, sectorUtil: {sector: util}, sectorUtilMax } where utilisation = demand (up to 1.25x each name cap) / limit.
+   */
+  function allocate(items) {
+    var sec = {}, tot = 0, SL = sectorLimit();
+    items.forEach(function (it) { var d = Math.min(it.demand, C.HARD_STOP * it.cap); it._d = d; sec[it.sector] = (sec[it.sector] || 0) + d; tot += d; });
+    var sUtil = {}, sMax = 0, secAllowed = 0;
+    Object.keys(sec).forEach(function (k) { sUtil[k] = sec[k] / SL; sMax = Math.max(sMax, sUtil[k]); secAllowed += Math.min(sec[k], SL); });
+    var firmScale = secAllowed > C.FIRM_LIMIT ? C.FIRM_LIMIT / secAllowed : 1, lim = {};
+    items.forEach(function (it) {
+      var ss = sec[it.sector] > SL ? SL / sec[it.sector] : 1;
+      var bind = ss * firmScale < 1;
+      // binding sector/firm limit: the name gets its pro-rata share of the shared limit; otherwise its own cap
+      lim[it.key] = bind ? Math.min(it.cap, it._d * ss * firmScale) : it.cap;
+    });
+    return { lim: lim, firmUtil: tot / C.FIRM_LIMIT, sectorUtil: sUtil, sectorUtilMax: sMax };
+  }
+  /**
+   * Closed-form FIFO fill of U identical orders of `o` dollars (K x shares) into an effective limit Lim ($), v3 bands:
+   * open (u < 0.90): fill if it fits; near cap (0.90-1.00): only orders <= 0.5% of the limit; over: surgePct pay surge
+   * (no surge fill above 1.25 x limit), the rest wait. M = max(2, M(stress)) for over-capacity orders; normal fills pay
+   * M(stress) (1.0 unless the book is stressed). Returns counts plus sumMm1 = total (M - 1) over filled orders.
+   */
+  function fillBook(U, o, Lim, surgePct, stress) {
+    U = Math.max(0, Math.round(U)); var r = { normal: 0, surge: 0, wait: 0, waitHard: 0, sumMm1: 0, Mnorm: surgeMultiplier(stress), Msurge: Math.max(2, surgeMultiplier(stress)), Lim: Lim };
+    if (!(o > 0) || !U) { r.Qn = r.Qs = 0; r.u = 0; r.Mmin = r.Mmax = 0; return r; }
+    if (!(Lim > 0)) { r.wait = r.waitHard = U; r.Qn = r.Qs = 0; r.u = 0; r.Mmin = r.Mmax = 0; return r; }
+    var k1 = Math.min(U, Math.max(0, Math.ceil(C.NEAR_CAP * Lim / o)));             // orders filled while u < 0.90
+    if (k1 * o > Lim) k1 = Math.floor(Lim / o);
+    var used = k1 * o, k2 = 0;
+    if (o <= C.NEAR_CAP_MAX_ORDER * Lim) k2 = Math.min(U - k1, Math.max(0, Math.floor((Lim - used) / o)));
+    used += k2 * o; r.normal = k1 + k2;
+    var rest = U - r.normal, want = Math.floor(rest * surgePct + 1e-9), room = Math.max(0, Math.floor((C.HARD_STOP * Lim - used) / o));
+    r.surge = Math.min(want, room); r.wait = rest - r.surge; r.waitHard = Math.max(0, want - r.surge);
+    r.Qn = r.normal * o; r.Qs = r.surge * o; r.u = (r.Qn + r.Qs) / Lim;
+    r.sumMm1 = r.normal * (r.Mnorm - 1) + r.surge * (r.Msurge - 1);
+    r.Mmin = r.surge ? r.Msurge : 0; r.Mmax = r.Mmin;
+    return r;
+  }
+
   /** $/min. The one swappable entry point used by the app. */
   function insuranceRatePerMinute(opts) { return insuranceRateBreakdown(opts).rate; }
 
@@ -184,7 +273,9 @@
   g.paracordNightLump = nightLump;
   g.paracordBsPut = bsPut;
   g.paracordCapShares = capShares;
+  g.paracordLockVol = lockVol;
+  g.paracordLimits = { nameLimit: nameLimit, sectorLimit: sectorLimit, allocate: allocate, fillBook: fillBook, bookStress: bookStress, surgeMultiplier: surgeMultiplier };
   g.PARACORD_RATE_CONSTANTS = C;
-  g.PARACORD_RATE_META = { placeholder: true, source: 'paracord-pricing-v4.md (draft v4)' };
-  if (typeof module !== 'undefined') module.exports = { insuranceRatePerMinute: insuranceRatePerMinute, insuranceRateBreakdown: insuranceRateBreakdown, chargeForInterval: chargeForInterval, dayCharge: dayCharge, nightLump: nightLump, taper: taper, bsPut: bsPut, floorCharge: floorCharge, capShares: capShares, G: G, Phi: Phi, C: C };
+  g.PARACORD_RATE_META = { placeholder: true, source: 'paracord-pricing-v4.md (draft v4) + p9 lock vol / firm limits' };
+  if (typeof module !== 'undefined') module.exports = { insuranceRatePerMinute: insuranceRatePerMinute, insuranceRateBreakdown: insuranceRateBreakdown, chargeForInterval: chargeForInterval, dayCharge: dayCharge, nightLump: nightLump, taper: taper, bsPut: bsPut, floorCharge: floorCharge, capShares: capShares, G: G, Phi: Phi, C: C, lockVol: lockVol, nameLimit: nameLimit, sectorLimit: sectorLimit, allocate: allocate, fillBook: fillBook, bookStress: bookStress, surgeMultiplier: surgeMultiplier };
 })(typeof window !== 'undefined' ? window : globalThis);

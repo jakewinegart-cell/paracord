@@ -1,5 +1,7 @@
-/* Paracord — Projections playground (DEMO). Implements the capacity / queue / surge /
- * overnight model of /workspace/paracord-pricing-v3.md, repriced per paracord-pricing-v4.md, on DEMO inputs only.
+/* Paracord — Projections playground (DEMO). Implements the queue / surge / overnight model of
+ * /workspace/paracord-pricing-v3.md, repriced per paracord-pricing-v4.md, with the p9 changes: lock vol = max(recent
+ * realized, options-implied incl. earnings bump) and firm-wide $ limits (per name / sector / firm) with book-stress
+ * surge in place of the 1%-of-float pool. Stock inputs: demo snapshot, as of Oct 23, 2026 (data/universe.js).
  * Reuses rate.js (insuranceRateBreakdown) for the daytime base rate. Nothing here is live data. */
 (function (g) {
   'use strict';
@@ -9,8 +11,9 @@
   var KEY = 'paracord-proj-v1';
   var MIN_PER_YEAR = 252 * 390;
   var COVERAGE_OPTS = [0.25, 0.5, 0.75, 1];   // p3 coverage-length toggle: fraction of the trading-session window held
-  var P = {              // v3 constants (EXAMPLE values from the md)
-    q: 0.01,             // Q_max = 1% of float
+  var LIM = g.paracordLimits;
+  var AS_OF = Date.parse(((g.PC_UNIVERSE || {}).as_of || '2026-10-23') + 'T20:00:00Z'); // snapshot close: lock time for projections
+  var P = {              // v3 constants (EXAMPLE values from the md); capacity is now rate.js firm limits
     nearCap: 0.90, hardStop: 1.25, nearCapMaxOrder: 0.005,
     nightLoad: 1.12,     // 1.12 * E_night * L * (1 + 3H)
     Tc: 17.5,            // closed hours, normal weeknight
@@ -19,8 +22,8 @@
     reserveDrop: 0.20    // reserve target: payout on a 20% drop across surge shares
   };
 
-  /** M(u) = 2 + (u - 1)/0.25 for 1 <= u < 1.25 (u below 1 is clamped to 2.0x) */
-  function surgeMultiplier(u) { return 2 + (Math.min(Math.max(u, 1), P.hardStop) - 1) / 0.25; }
+  /** p9: surge multiplier from book-wide stress (rate.js) */
+  function surgeMultiplier(s) { return LIM.surgeMultiplier(s); }
   function Gz(z) { var phi = Math.exp(-0.5 * z * z) / Math.sqrt(2 * Math.PI); return phi - z * (1 - Phi(z)); }
   function Phi(z) {
     var x = Math.abs(z) / Math.SQRT2, t = 1 / (1 + 0.3275911 * x);
@@ -39,24 +42,20 @@
     return { E: E, raw: raw, premium: Math.min(raw, cap), capped: raw > cap, sigmaGap: sigmaGap, IM: sigmaGap * 0.798, perHour: Math.min(raw, cap) / P.Tc };
   }
 
-  /** FIFO fill of U identical orders of n shares into a pool of Q_max (md sec. 3–5). */
-  function fill(U, n, Qmax, surgePct) {
-    var Qn = 0, Qs = 0, r = { normal: 0, surge: 0, wait: 0, waitHard: 0, sumMm1: 0, Mmin: 0, Mmax: 0, firstSurgeAt: 0 };
-    var acc = 0;
-    for (var i = 0; i < U; i++) {
-      var Q = Qn + Qs, u = Q / Qmax, room = Qmax - Q;
-      if (u >= P.hardStop) { r.waitHard += U - i; r.wait += U - i; break; }
-      if (n <= room && (u < P.nearCap || n <= P.nearCapMaxOrder * Qmax)) { Qn += n; r.normal++; continue; }
-      // over capacity (or the order doesn't fit): choose surge or wait, deterministically by surgePct
-      acc += surgePct; var wantsSurge = acc >= 1; if (wantsSurge) acc -= 1;
-      if (wantsSurge && (Q + n) / Qmax <= P.hardStop) {
-        var M = surgeMultiplier(u);
-        Qs += n; r.surge++; r.sumMm1 += M - 1;
-        if (!r.Mmin) { r.Mmin = M; r.firstSurgeAt = i + 1; } r.Mmax = M;
-      } else { r.wait++; if ((Q + n) / Qmax > P.hardStop) r.waitHard++; }
-    }
-    r.Qn = Qn; r.Qs = Qs; r.u = (Qn + Qs) / Qmax; r.Qmax = Qmax;
-    return r;
+  /** p9: closed-form FIFO fill in $ (rate.js fillBook). U orders of n shares at K into an effective $ limit. */
+  function fill(U, n, K, lim, surgePct, stress) { return LIM.fillBook(U, n * K, lim, surgePct, stress); }
+  /** lock vol for a demo stock at the snapshot close: max(20-day realized, implied incl. earnings bump in the next 28 days) */
+  function lockVolOf(d) { return g.paracordLockVol(d, { at: AS_OF, rv: d.vol20 }); }
+  /** per-person capped shares for each stock (filled in display order for the $25k total) */
+  function capped(ts, I) {
+    var other = 0;
+    return ts.map(function (t) { var d = BY_T[t], K = d.p0 * (1 - I.cushion / 100), n = g.paracordCapShares(K, I.shares, other); other += K * n; return { t: t, K: K, n: n, other: other - K * n }; });
+  }
+  /** firm limits across the projected stocks: effective $ limit per stock and book stress */
+  function allocFor(cs, I) {
+    var al = LIM.allocate(cs.map(function (c) { return { key: c.t, sector: BY_T[c.t].sector, demand: I.users * c.n * c.K, cap: LIM.nameLimit(BY_T[c.t]) }; }));
+    al.stress = LIM.bookStress(al.firmUtil, al.sectorUtilMax, 0); al.M = LIM.surgeMultiplier(al.stress);
+    return al;
   }
 
   /**
@@ -65,19 +64,22 @@
    * ($5,000 per stock / $25,000 total, K x shares, per verified person), annual membership (non-refundable) as up-front cash.
    * `otherInsured` = insured value (K x shares) the same person already has in other stocks (for the $25k total cap).
    */
-  function projectStock(t, I, otherInsured) {
+  function projectStock(t, I, otherInsured, al) {
     var d = BY_T[t], S = d.p0, nReq = I.shares, K = S * (1 - I.cushion / 100), H = I.news;
     var n = g.paracordCapShares(K, nReq, otherInsured || 0);  // per-person cap: covered shares per user
     var capWhy = n >= nReq ? null : (K * (nReq) > C.CAP_PER_STOCK && (otherInsured || 0) + C.CAP_PER_STOCK <= C.CAP_TOTAL ? 'per-stock' : 'total');
     var day = Math.max(1, Math.round(I.day || 1)), taper = g.paracordTaper(day);
-    var lock = { price: S, volatility: d.vol, news: H };  // locked at the start of the policy
-    var o = { price: S, shares: n, lockIn: K, volatility: d.vol, float: d.float, adv: d.adv, news: H, lock: lock };
+    var lv = lockVolOf(d);                                  // p9: max(recent realized, implied) -> rate AND floor
+    var lock = { price: S, volatility: lv.used, news: H };  // locked at the start of the policy
+    var o = { price: S, shares: n, lockIn: K, volatility: lv.used, float: d.float, adv: d.adv, news: H, lock: lock };
     var b = g.insuranceRateBreakdown(Object.assign({}, o, { day: day }));
     var sigma1 = b.sigma1, sigAnn = b.sigAnn;
     var base = b.base;                                      // tapered per-minute base, no D, no floor
-    var Qmax = P.q * d.float;
-    var f = fill(I.users, n, Qmax, I.surgePct / 100);
-    var insured = f.normal + f.surge, insShares = f.Qn + f.Qs;
+    if (!al) al = allocFor([{ t: t, K: K, n: n }], I);
+    var lim = al.lim[t], nameLim = LIM.nameLimit(d);
+    var f = fill(I.users, n, K, lim, I.surgePct / 100, al.stress);
+    f.QsSh = K ? f.Qs / K : 0;
+    var insured = f.normal + f.surge, insShares = K ? (f.Qn + f.Qs) / K : 0;
     var cov = COVERAGE_OPTS.indexOf(+I.coverage) >= 0 ? +I.coverage : 1;
     var mFull = I.hours * 60;
     var m = mFull * cov;                                    // covered (billed) session minutes per trading day
@@ -109,12 +111,12 @@
     var tailPerShare = Math.max(0, K - S * (1 - P.tailZ * sdGapLoss));  // 95th-pct gap
     var tail = I.overnight ? insShares * tailPerShare : 0;
     var reserve = dayUplift + nightUplift;
-    var reserveTarget = f.Qs * Math.max(0, K - S * (1 - P.reserveDrop));
-    var surgeTail = I.overnight ? f.Qs * tailPerShare : 0;
+    var reserveTarget = f.QsSh * Math.max(0, K - S * (1 - P.reserveDrop));
+    var surgeTail = I.overnight ? f.QsSh * tailPerShare : 0;
     var reservePays = Math.min(reserve, surgeTail);
     var fee = +I.fee || C.MEMBERSHIP_FEE;
     return {
-      t: t, S: S, K: K, n: n, nReq: nReq, capWhy: capWhy, insuredValue: K * n, day: day, taper: taper, sigma1: sigma1, b: b, base: base, Qmax: Qmax, f: f, insured: insured, insShares: insShares,
+      t: t, S: S, K: K, n: n, nReq: nReq, capWhy: capWhy, insuredValue: K * n, day: day, taper: taper, sigma1: sigma1, b: b, base: base, lim: lim, nameLim: nameLim, al: al, lv: lv, f: f, insured: insured, insShares: insShares,
       m: m, mFull: mFull, cov: cov, dfac: dfac, discEligible: discEligible, perDay: perDay, perNight: perNight,
       floorDay: cDay.floor, floorBinds: cDay.floorBinds, capBinds: cDay.capBinds, baseDay: cDay.base,
       dayBase: dayBase, dayUplift: dayUplift, dayPrem: dayPrem, dayLoss: dayLoss, dayProfit: dayPrem - dayLoss, lossPerPolicyDay: lossPerPolicyDay,
@@ -128,8 +130,9 @@
 
   function project(I) {
     var ts = I.stock === 'ALL' ? STOCKS.map(function (s) { return s.t; }) : [I.stock];
-    var other = 0; // per-person $25k total cap: stocks are filled in display order
-    var rows = ts.map(function (t) { var r = projectStock(t, I, other); other += r.insuredValue; return r; });
+    // per-person $25k total cap: stocks are filled in display order; firm limits are shared across the stocks projected
+    var cs = capped(ts, I), al = allocFor(cs, I);
+    var rows = cs.map(function (c) { return projectStock(c.t, I, c.other, al); });
     var tot = {};
     ['dayPrem', 'dayBase', 'dayUplift', 'dayLoss', 'dayProfit', 'nightPrem', 'nightUplift', 'nightLoss', 'nightProfit', 'tail', 'badNight', 'reserve', 'reserveTarget', 'reservePays', 'capitalPays', 'profit', 'insShares'].forEach(function (k) {
       tot[k] = rows.reduce(function (a, r) { return a + r[k]; }, 0);
@@ -167,6 +170,9 @@
   function money(n, d) { if (d == null) d = Math.abs(n) >= 100 ? 0 : 2; return (n < 0 ? '−$' : '$') + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }); }
   function signed(n, d) { return (n >= 0 ? '+' : '') + money(n, d); }
   function num(n) { return Math.round(n).toLocaleString(); }
+  function bigm(x) { var v = Math.abs(x); return '$' + (v >= 1e9 ? (v / 1e9).toFixed(2) + 'B' : v >= 1e6 ? (v / 1e6).toFixed(v >= 1e8 ? 0 : 1) + 'M' : v >= 1e3 ? (v / 1e3).toFixed(0) + 'K' : Math.round(v)); }
+  function pct0(x) { return Math.round(x * 100) + '%'; }
+  function volLine(lv) { return pct0(lv.used) + ' (higher of recent ' + pct0(lv.rv) + ' / options-implied ' + pct0(lv.iv) + (lv.earnInside ? ', incl. earnings ' + lv.earnDate + ' +' + (lv.bumpPts * 100).toFixed(1) + ' pts' : '') + (lv.ivSrc === 'assumed' ? ', implied assumed for a fictional stock' : lv.ivSrc === 'iv30' ? ', implied estimated' : '') + ')'; }
   function cls(n) { return n >= 0 ? 'up' : 'down'; }
 
   function fieldHtml(f) {
@@ -180,7 +186,7 @@
 
   function view() {
     return '<div id="pj-root"><div class="pj-tag">PROJECTION — DEMO INPUTS</div>' +
-      '<p class="pj-intro">Playground for the draft v4 pricing (rate locked at start, duration taper, put-value floor, per-person caps, annual membership; capacity, waiting line, surge and overnight from v3). All inputs and prices are simulated examples, not forecasts.</p>' +
+      '<p class="pj-intro">Playground for the draft v4 pricing with the p9 changes (rate locked at start at max(recent, implied) volatility, duration taper, put-value floor, per-person caps, annual membership, firm-wide limits with book-stress surge; waiting line and overnight from v3). Stock inputs: ' + ((g.PC_UNIVERSE || {}).label || 'demo snapshot') + '. Outputs are examples, not forecasts.</p>' +
       '<div class="pj-card"><h3 class="pj-h">Inputs</h3>' +
       '<div class="pj-field"><div class="pj-flabel"><span>Stock</span></div>' + segHtml('stock', [['COP', 'COP'], ['WMT', 'WMT'], ['NVDA', 'NVDA'], ['MOON', 'MOON'], ['ALL', 'All four']]) + '</div>' +
       FIELDS.slice(0, 4).map(fieldHtml).join('') +
@@ -208,13 +214,13 @@
   function capBar(r) {
     var f = r.f, U = I.users || 1;
     var seg = function (v, c) { return v ? '<span class="pj-bar-' + c + '" style="width:' + (v / U * 100) + '%"></span>' : ''; };
-    var band = f.u >= P.hardStop ? 'Hard stop' : f.u >= 1 ? 'At cap (surge)' : f.u >= P.nearCap ? 'Near cap' : 'Open';
+    var band = f.u >= P.hardStop - 1e-9 ? 'Hard stop' : f.u >= 1 ? 'At cap (surge)' : f.u >= P.nearCap ? 'Near cap' : 'Open';
     var uw = Math.min(100, f.u / 1.3 * 100);
     return '<div class="pj-cap"><div class="pj-row"><b>' + r.t + '</b><span class="pj-band pj-band-' + band.split(' ')[0].toLowerCase() + '">' + band + ' · u ' + f.u.toFixed(2) + '</span></div>' +
       '<div class="pj-bar" aria-label="Users by fill type">' + seg(f.normal, 'n') + seg(f.surge, 's') + seg(f.wait, 'w') + '</div>' +
       '<div class="pj-legend"><span><i class="pj-dot n"></i>Normal ' + num(f.normal) + '</span><span><i class="pj-dot s"></i>Surge ' + num(f.surge) + (f.surge ? ' (' + f.Mmin.toFixed(2) + '–' + f.Mmax.toFixed(2) + '×)' : '') + '</span><span><i class="pj-dot w"></i>Waiting ' + num(f.wait) + '</span></div>' +
       '<div class="pj-util"><span style="width:' + uw + '%"></span><em style="left:' + (0.9 / 1.3 * 100) + '%"></em><em style="left:' + (1 / 1.3 * 100) + '%"></em><em style="left:' + (1.25 / 1.3 * 100) + '%"></em></div>' +
-      '<div class="pj-sub">Q_max ' + num(r.Qmax) + ' sh (1% of ' + (BY_T[r.t].float / 1e6).toLocaleString() + 'M float) · insured ' + num(r.insShares) + ' sh · ticks at u = 0.90 / 1.00 / 1.25</div></div>';
+      '<div class="pj-sub">Limit ' + bigm(r.lim) + (r.lim < r.nameLim - 1 ? ' (sector/firm share; name limit ' + bigm(r.nameLim) + ')' : ' = min(10% of the ' + bigm(C.FIRM_LIMIT) + ' firm limit, 10% of ' + bigm(BY_T[r.t].addv) + '/day traded)') + ' · insured ' + bigm(f.Qn + f.Qs) + ' (' + num(r.insShares) + ' sh) · book stress ' + r.al.stress.toFixed(2) + (r.al.M > 1 ? ' → surge ×' + r.al.M.toFixed(2) + ' on new locks' : '') + ' · ticks at u = 0.90 / 1.00 / 1.25</div></div>';
   }
   function kpi(k, v, sub, c) { return '<div class="pj-kpi"><div class="k">' + k + '</div><div class="v ' + (c || '') + '">' + v + '</div>' + (sub ? '<div class="pj-sub">' + sub + '</div>' : '') + '</div>'; }
   function line(k, v, c) { return '<div class="pj-line' + (c ? ' ' + c : '') + '"><span>' + k + '</span><b>' + v + '</b></div>'; }
@@ -244,7 +250,8 @@
     h += '<div class="pj-card" id="pj-breakdown"><h3 class="pj-h">Breakdown <span class="pj-mini">Projection — demo inputs</span></h3>' + rows.map(function (r) {
       var b = r.b;
       return '<div class="pj-bd"><div class="pj-bdh">' + r.t + ' · S ' + money(r.S, 2) + ' · K ' + money(r.K, 2) + ' · ' + r.n + ' sh/user</div>' +
-        '<div class="pj-formula">Rate locked at start (S ' + money(r.S, 2) + ', σ ' + Math.round(BY_T[r.t].vol * 100) + '%, H ' + I.news.toFixed(2) + ') · base₁ = 0.0029 × E ' + money(b.E, 2) + ' × L ' + b.L.toFixed(3) + ' × (1+3H) = ' + money(b.baseRaw, 4) + '/min · day ' + r.day + ' taper ×' + r.taper.toFixed(3) + ' → ' + money(r.base, 4) + '/min</div>' +
+        '<div class="pj-formula">Rate locked at start (S ' + money(r.S, 2) + ', H ' + I.news.toFixed(2) + ') · base₁ = 0.0029 × E ' + money(b.E, 2) + ' × L ' + b.L.toFixed(3) + ' × (1+3H) = ' + money(b.baseRaw, 4) + '/min · day ' + r.day + ' taper ×' + r.taper.toFixed(3) + ' → ' + money(r.base, 4) + '/min</div>' +
+        line('Volatility used (rate and put floor)', volLine(r.lv)) +
         line('Covered shares per user (cap $' + C.CAP_PER_STOCK.toLocaleString() + '/stock, $' + C.CAP_TOTAL.toLocaleString() + ' total, per verified person)', num(r.n) + ' of ' + num(r.nReq) + ' requested · insured value ' + money(r.insuredValue)) +
         line('Base: tapered rate × covered minutes × D (base only)', money(r.base, 4) + ' × ' + num(r.m) + (r.cov < 1 ? ' (' + num(r.mFull) + ' × ' + Math.round(r.cov * 100) + '%)' : '') + ' × ' + r.dfac.toFixed(3) + ' = ' + money(r.baseDay, 2) + '/policy' + (r.discEligible ? '' : ' (10% off needs overnight + 6.5 h + 100% coverage)')) +
         line('Floor: 1.15 × N × BS put for this day\'s covered variance', money(r.floorDay, 2) + '/policy' + (r.floorBinds ? ' ← binds' : '')) +
@@ -268,14 +275,16 @@
           : '<div class="pj-sub">Turn on overnight coverage to see the night price and the bad-night scenario.</div>') + '</div>';
     }).join('') + '</div>';
     h += '<details class="pj-card pj-assume"><summary>Assumptions</summary><ul class="pj-sub">' +
-      '<li>Prices are each demo stock\'s simulated reference price (COP $104.80, WMT $98.40, NVDA $182.50, MOON $24.20); σ is its simulated annual vol; F and ADV are simulated. Not market data.</li>' +
+      '<li>Stock inputs are a <b>' + ((g.PC_UNIVERSE || {}).label || 'demo snapshot') + '</b> (not live data): COP ' + money(BY_T.COP.p0, 2) + ', WMT ' + money(BY_T.WMT.p0, 2) + ', NVDA ' + money(BY_T.NVDA.p0, 2) + ' closing prices, realized vols, shares outstanding (float proxy), daily volume and options-implied vol; MOON ($24.20, implied vol 150% assumed) is fictional.</li>' +
+      '<li>p9 volatility: σ = max(recent realized vol (20-day), options-implied vol) for each stock, used for BOTH the locked base rate and the 1.15× put floor. Implied vol is Black-Scholes (r = 0) backed out of listed Nov-20-2026 put mids for COP/WMT/NVDA (higher of at-the-money and 5% below); it includes an earnings bump when a known report date (COP Nov 5, NVDA Nov 17, WMT Nov 19) falls within 28 days of the lock: σ² = σ_base² + m²·365/28, m = assumed 1-day earnings move (estimate).</li>' +
+      '<li>p9 capacity: firm-wide limits on insured value (K × shares): per stock min(10% of the ' + bigm(C.FIRM_LIMIT) + ' firm limit, 10% of its daily $ volume), per sector 25% of the firm limit, and the firm total (demo values). Surge is set by book-wide stress (firm or sector utilisation), so a crowded book raises prices on all names together.</li>' +
       '<li>v4: the rate is locked when coverage starts (S, σ and H at lock; S_eff = max(S, K)); later moves do not reprice it. Policy day n is trading days since the lock; turning coverage off resets it. The base is multiplied by f(n) = max(√n − √(n−1), 0.05), so cumulative base cost grows like √n, like a put.</li>' +
       '<li>Floor: each day\'s charge is at least 1.15 × N × [P(n·w) − P((n−1)·w)], the Black-Scholes put (σ_annual, r = 0) for the covered variance w = 0.75 × (covered session min / 390) + 0.25 × (night covered), in trading days. This is a minimum, not a target: the price never drops below the comparable put (cumulative charge ≥ 1.15 × the put). $6/min cap on the base before surge; $0.002/min operational minimum.</li>' +
       '<li>Full-day pricing: the session and the overnight gap are each priced on a full trading day of variance (as in v3). σ₁ = σ_annual × √(1 / (252·390)); the night lump is the stand-alone gap expected shortfall on a full day\'s variance. The put floor and expected losses use the physical split (session 75%, overnight 25% of a day\'s variance), so the floor matches the comparable listed put.</li>' +
       '<li>Per-person caps: covered shares = floor(min($5,000, $25,000 − insured value in other stocks) / K), per verified person (identity/KYC) — not per account. "All four" fills stocks in order for the $25k total.</li>' +
       '<li>Membership: every user pays the annual fee up front ($49 / $99 / $199). Non-refundable, so it is counted as cash kept with no refund liability; for accounting it is recognized evenly over the 12-month term (fee/365 per day). It is not included in premium or profit KPIs above.</li>' +
-      '<li>All users arrive at once, FIFO, identical orders. Open band (u &lt; 0.90): fill if it fits; near cap: fill only if it fits and ≤ 0.5% of Q_max; otherwise the chosen % pay surge (M fixed at the u they bought at; 2.0× if u &lt; 1) and the rest wait. No surge fill may push u above 1.25.</li>' +
-      '<li>"All four": every user insures the chosen shares in each stock; each stock has its own pool. Totals add stocks; the bad-gap total assumes all four gap down together.</li>' +
+      '<li>All users arrive at once, FIFO, identical orders. Open band (u &lt; 0.90 of the stock\'s limit): fill if it fits; near cap: fill only if it fits and ≤ 0.5% of the limit; otherwise the chosen % pay surge (M = max(2.0, M(book stress))) and the rest wait. No surge fill may push u above 1.25.</li>' +
+      '<li>"All four": every user insures the chosen shares in each stock; each stock has its own limit, and the sector and firm limits are shared. Totals add stocks; the bad-gap total assumes all four gap down together.</li>' +
       '<li>Expected loss: the increase in expected shortfall N·S·σ√τ·G(z) over day n\'s covered variance for a lock held since day 1 (σ_gap = σ_annual·√(0.25/252) overnight). News is assumed to raise realized vol by (1+H) for losses; the premium uses (1+3H), locked at start.</li>' +
       '<li>Overnight = one normal weeknight (T_c 17.5 h, no event), option (a) lump premium (full-day pricing: stand-alone gap ES on a full day of variance, tapered, never below the put floor), capped at $360/h × 17.5 h before surge.</li>' +
       '<li>10% off applies to base (day and night) only, and only when overnight is on, hours = 6.5 and coverage = 100%, since D needs an unbroken 24 h block.</li>' +

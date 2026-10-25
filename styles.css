@@ -145,3 +145,4 @@ details.how[open] summary::after{content:"▴"}
 .member-terms li { margin-bottom: 6px; }
 .member-agree input { margin-top: 2px; width: 18px; height: 18px; flex: none; }
 #memberJoin[disabled] { opacity: .45; }
+.conf-moves{margin-top:6px;line-height:1.55}

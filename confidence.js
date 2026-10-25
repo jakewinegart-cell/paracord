@@ -1,19 +1,27 @@
 /* Paracord — User Confidence Index (DEMO). A 0–100 score of how confident demo Paracord users feel,
  * computed from simulated crowd behavior (insurance turned on, cash-ins at the cushion, waiting line / surge),
  * the simulated market move and news shock. Next to it: a resilience check of today's demo book using the
- * v4 pieces (rate.js: rate locked at start, duration taper, 1.15x put floor, per-person caps; projections.js capacity fill
- * + surge multiplier; surge-uplift reserve; annual membership cash, non-refundable).
+ * v4 pieces (rate.js: rate locked at start, duration taper, 1.15x put floor, per-person caps, annual membership)
+ * and the p9 pieces (lock vol = max(recent realized, implied); firm-wide $ limits per name / sector / total with
+ * book-stress surge; sampled user portfolios across the whole demo-snapshot universe).
  * Nothing here is real data or a forecast. */
 (function (g) {
   'use strict';
-  var STOCKS = g.PC_STOCKS, PJ = g.PCProjections;
+  var DEFS = g.PC_UNIVERSE_DEFS && g.PC_UNIVERSE_DEFS.length ? g.PC_UNIVERSE_DEFS : g.PC_STOCKS;
+  var DEMO = (g.PC_STOCKS || []).map(function (s) { return s.t; });
+  var LIM = g.paracordLimits;
   var CFG = {
-    users: 100000,      // demo user base; each holds `shares` of every demo stock
-    shares: 100,
+    users: 100000,      // demo user base
+    samples: 4000,      // sampled portfolios; each stands for users / samples identical users
+    seed: 20261025,
+    demoPick: { NVDA: 0.4, WMT: 0.2, COP: 0.2, MOON: 0.2 }, // every user holds 1 demo name (35%: a 2nd) ...
+    secondDemo: 0.35,
+    spNames: [1, 3],    // ... plus 1–3 S&P 500 names (70% cap-weighted, 30% equal-weighted pick)
+    posMedian: 4000, posSigma: 0.9, // $ position per name: lognormal (median $4,000)
     cushion: 0.05,      // K = open × (1 − 5%)
     surgePct: 0.5,      // over-capacity users who pay surge (rest wait)
     session: 390, cashInMin: 195, // cash-ins assumed at mid-session: they pay 195 min, holders pay 390
-    panicSigma: 3, euphoriaSigma: 1.5, // scenario market move at mood −1 / +1, in daily σ of each stock
+    panicSigma: 3, euphoriaSigma: 1.5, // scenario index move at mood −1 / +1, in daily σ (applied to the sim's market factor)
     fee: (g.PARACORD_RATE_CONSTANTS || {}).MEMBERSHIP_FEE || 99 // annual membership, paid up front, non-refundable
   };
   var RC = g.PARACORD_RATE_CONSTANTS;
@@ -25,56 +33,95 @@
   function shortfall(N, S, K, sd) { if (sd <= 0) return Math.max(0, K - S) * N; return N * S * sd * Gz((S - K) / (S * sd)); }
   function band(v) { for (var i = 0; i < BANDS.length; i++) if (v < BANDS[i][1]) return BANDS[i][2]; return 'Euphoric'; }
 
+  /* ---- sampled portfolios (seeded, built once): per name, holders and average capped shares per holder ---- */
+  function rng(seed) { var a = seed >>> 0; return function () { a |= 0; a = a + 0x6D2B79F5 | 0; var t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+  var CROWD = (function () {
+    var R = rng(CFG.seed), by = {}, sp = DEFS.filter(function (d) { return DEMO.indexOf(d.t) < 0 && !d.fictional; });
+    var wsum = sp.reduce(function (a, d) { return a + (d.w || 0); }, 0), cum = [], acc = 0;
+    sp.forEach(function (d) { acc += 0.7 * (wsum ? (d.w || 0) / wsum : 0) + 0.3 / sp.length; cum.push(acc); });
+    function pickSp() { var u = R() * acc, lo = 0, hi = cum.length - 1; while (lo < hi) { var m = (lo + hi) >> 1; if (cum[m] < u) lo = m + 1; else hi = m; } return sp[lo]; }
+    var dk = Object.keys(CFG.demoPick).filter(function (t) { return g.PC_UNIVERSE_BY_T ? g.PC_UNIVERSE_BY_T[t] : true; });
+    function pickDemo(ex) { var tot = 0; dk.forEach(function (t) { if (t !== ex) tot += CFG.demoPick[t]; }); var u = R() * tot; for (var i = 0; i < dk.length; i++) { if (dk[i] === ex) continue; u -= CFG.demoPick[dk[i]]; if (u <= 0) return dk[i]; } return dk[dk.length - 1]; }
+    function gauss() { var u = 0, v = 0; while (!u) u = R(); while (!v) v = R(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
+    var wUser = CFG.users / CFG.samples, BYT = {}; DEFS.forEach(function (d) { BYT[d.t] = d; });
+    var namesPer = 0, insuredPer = 0;
+    for (var s = 0; s < CFG.samples; s++) {
+      var names = [pickDemo(null)]; if (R() < CFG.secondDemo) names.push(pickDemo(names[0]));
+      var k = CFG.spNames[0] + Math.floor(R() * (CFG.spNames[1] - CFG.spNames[0] + 1));
+      for (var j = 0; j < k; j++) { var d = pickSp(); if (names.indexOf(d.t) < 0) names.push(d.t); }
+      // random order for the $25k total cap
+      for (var q = names.length - 1; q > 0; q--) { var r = Math.floor(R() * (q + 1)), tmp = names[q]; names[q] = names[r]; names[r] = tmp; }
+      var other = 0;
+      names.forEach(function (t) {
+        var dd = BYT[t]; if (!dd) return;
+        var px = dd.p0, sh = Math.max(1, Math.round(CFG.posMedian * Math.exp(CFG.posSigma * gauss()) / px)), K = px * (1 - CFG.cushion);
+        var c = g.paracordCapShares(K, sh, other); other += c * K;
+        if (c <= 0) return;
+        var a = by[t] || (by[t] = { holders: 0, shares: 0 }); a.holders += wUser; a.shares += wUser * c;
+        namesPer += 1; insuredPer += c * K;
+      });
+    }
+    Object.keys(by).forEach(function (t) { by[t].sh = by[t].shares / by[t].holders; });
+    return { by: by, names: Object.keys(by), avgNames: namesPer / CFG.samples, avgInsured: insuredPer / CFG.samples };
+  })();
+  var BY_T = {}; DEFS.forEach(function (d) { BY_T[d.t] = d; });
+
   /**
-   * ctx: { price(t), open(t), sigma1(t), news(t), mood (−1..1, eased), noise (small, per tick) }
+   * ctx: { price(t), open(t), sigma1(t) (recent realized, per min), news(t), mood (−1..1, eased), noise, at (sim ms) }
    * Returns the index, its inputs, and the resilience book.
    */
   function compute(ctx) {
     var mood = clamp(ctx.mood, -1, 1);
-    var overlay = mood < 0 ? mood * CFG.panicSigma : mood * CFG.euphoriaSigma; // scenario market move, σ units
-    var legs = STOCKS.map(function (d) {
-      var S0 = ctx.open(d.t), sd = d.vol / Math.sqrt(252);
-      var x = Math.log(ctx.price(d.t) / S0) + overlay * sd;
-      return { d: d, S0: S0, sd: sd, x: x, S: S0 * Math.exp(x), H: ctx.news(d.t), sigma1: ctx.sigma1(d.t) };
+    var overlay = mood < 0 ? mood * CFG.panicSigma : mood * CFG.euphoriaSigma; // scenario index move (σ), applied by the sim
+    var wsum = 0, mkt = 0, H = 0, down = 0, legs = [];
+    CROWD.names.forEach(function (t) {
+      var d = BY_T[t], cw = CROWD.by[t]; if (!d || !ctx.has(t)) return;
+      var S0 = ctx.open(t), sd = d.vol / Math.sqrt(252), S = ctx.price(t), x = Math.log(S / S0);
+      var l = { d: d, S0: S0, sd: sd, x: x, S: S, H: ctx.news(t), sigma1: ctx.sigma1(t), holders: cw.holders, shPer: cw.sh };
+      legs.push(l); wsum += cw.holders; mkt += cw.holders * x / sd; H += cw.holders * l.H; if (x < 0) down++;
     });
-    var mkt = legs.reduce(function (a, l) { return a + l.x / l.sd; }, 0) / legs.length;  // avg move in daily σ
-    var H = legs.reduce(function (a, l) { return a + l.H; }, 0) / legs.length;
+    mkt = wsum ? mkt / wsum : 0; H = wsum ? H / wsum : 0;   // holder-weighted move in daily σ and news
     // share of users turning insurance on (panic lock-ins push it up; calm/greed pulls it down)
     var pIns = sigmoid(-1.0 - 0.9 * clamp(mkt, -4, 3) + 1.6 * H - 1.4 * mood + (ctx.noise || 0));
     var orders = Math.round(CFG.users * pIns);
-    var T = { prem: 0, base: 0, uplift: 0, pay: 0, payCash: 0, payExp: 0, policies: 0, cashers: 0, wait: 0, surge: 0, orders: 0, target: 0, uMax: 0, uSum: 0 };
-    var other = 0; // per-person $25k total cap across stocks (each user holds CFG.shares of every stock)
-    legs.forEach(function (l) {
-      var d = l.d, K = l.S0 * (1 - CFG.cushion);
-      var sh = g.paracordCapShares(K, CFG.shares, other); other += sh * K;   // capped shares per person
-      var f = PJ.fill(orders, sh, 0.01 * d.float, CFG.surgePct);
+    // p9 firm-wide limits: demand per name in $ (K × capped shares), shared sector / firm limits, book-wide stress
+    var items = legs.map(function (l) {
+      var K = l.S0 * (1 - CFG.cushion); l.K = K; l.sh = Math.max(1, Math.round(l.shPer)); l.orders = Math.round(pIns * l.holders);
+      return { key: l.d.t, sector: l.d.sector, demand: l.orders * l.sh * K, cap: LIM.nameLimit(l.d) };
+    });
+    var al = LIM.allocate(items), stress = LIM.bookStress(al.firmUtil, al.sectorUtilMax, mkt), Mnow = LIM.surgeMultiplier(stress);
+    var T = { prem: 0, base: 0, uplift: 0, pay: 0, payCash: 0, payExp: 0, policies: 0, cashers: 0, wait: 0, surge: 0, orders: 0, target: 0, uMax: 0, uSum: 0, insured: 0 };
+    var at = ctx.at || Date.now();
+    legs.forEach(function (l, i) {
+      var d = l.d, K = l.K, sh = l.sh;
+      var f = LIM.fillBook(l.orders, sh * K, al.lim[d.t], CFG.surgePct, stress);
       var pol = f.normal + f.surge;
-      // v4: rate locked at the open (crowd locks at the open price, its σ₁ and news at that time); a later move does
-      // not reprice it. rateNow = the locked base a user would get by locking right now (new locks only).
-      if (!LOCK[d.t]) LOCK[d.t] = { price: l.S0, sigma1: l.sigma1, news: l.H };
-      var o = { price: l.S, shares: sh, lockIn: K, sigma1: l.sigma1, float: d.float, adv: d.adv, news: l.H };
+      // v4 rate lock + p9 lock vol: the crowd locks at the open price, news then, and vol = max(recent realized, implied)
+      // (implied includes an earnings bump if a known report date falls in the next 28 days). Later moves don't reprice.
+      var rv = l.sigma1 * Math.sqrt(RC.MIN_PER_YEAR / RC.w_session), lv = g.paracordLockVol(d, { at: at, rv: rv });
+      if (!LOCK[d.t]) LOCK[d.t] = { price: l.S0, volatility: lv.used, news: l.H, lv: lv };
+      var o = { price: l.S, shares: sh, lockIn: K, volatility: lv.used, float: d.float, adv: d.adv, news: l.H };
       var base0 = g.insuranceRateBreakdown(Object.assign({}, o, { lock: LOCK[d.t] })).baseRaw;
-      var rateNow = g.insuranceRateBreakdown(Object.assign({}, o, { lock: { price: l.S, sigma1: l.sigma1, news: l.H } })).baseRaw;
-      var base1 = base0, half = CFG.session - CFG.cashInMin;
+      var rateNow = g.insuranceRateBreakdown(Object.assign({}, o, { lock: { price: l.S, volatility: lv.used, news: l.H } })).baseRaw;
       var below = l.S < K, cashFrac = below ? 0.2 + 0.7 * pIns : 0;  // optional exercise: only some of those below K cash in
       var cashers = pol * cashFrac, holders = pol - cashers;
-      var perPolicyHolder = base0 * CFG.session, perPolicyCasher = base0 * CFG.cashInMin;
-      var basePrem = holders * perPolicyHolder + cashers * perPolicyCasher;
-      var uplift = pol ? basePrem / pol * f.sumMm1 : 0;   // surge users pay Base × (M − 1) on top → reserve
-      var base = base0;
+      var basePrem = holders * base0 * CFG.session + cashers * base0 * CFG.cashInMin;
+      var uplift = pol ? basePrem / pol * f.sumMm1 : 0;   // surge: charge × (M − 1) on top → reserve
       var payCash = cashers * sh * Math.max(0, K - l.S);
       var sdRest = l.sigma1 * (1 + l.H) * Math.sqrt(CFG.session - CFG.cashInMin);
       var payExp = holders * shortfall(sh, l.S, K, sdRest);
-      l.sh = sh; l.lock = LOCK[d.t]; l.rateNow = rateNow; l.o = o;
-      l.cashFrac = cashFrac; l.sdRest = sdRest; l.f = f; l.pol = pol; l.base = base; l.base1 = base1; l.cashers = cashers; l.prem = basePrem + uplift; l.pay = payCash + payExp; l.K = K;
+      l.lock = LOCK[d.t]; l.lv = lv; l.rateNow = rateNow; l.o = o;
+      l.cashFrac = cashFrac; l.sdRest = sdRest; l.f = f; l.pol = pol; l.base = base0; l.cashers = cashers; l.prem = basePrem + uplift; l.pay = payCash + payExp;
       T.base += basePrem; T.uplift += uplift; T.prem += basePrem + uplift; T.payCash += payCash; T.payExp += payExp; T.pay += payCash + payExp;
-      T.policies += pol; T.cashers += cashers; T.wait += f.wait; T.surge += f.surge; T.orders += orders;
-      T.target += f.Qs * Math.max(0, K - l.S0 * 0.8); T.uMax = Math.max(T.uMax, f.u); T.uSum += f.u;
+      T.policies += pol; T.cashers += cashers; T.wait += f.wait; T.surge += f.surge; T.insured += f.Qn + f.Qs;
+      T.target += f.Qs / K * Math.max(0, K - l.S0 * 0.8); T.uMax = Math.max(T.uMax, Math.min(f.u, al.lim[d.t] ? (f.Qn + f.Qs) / LIM.nameLimit(d) : 0)); T.uSum += f.u;
     });
-    T.orders = orders;
-    T.uAvg = T.uSum / legs.length;
+    T.orders = orders; T.legOrders = legs.reduce(function (a, l) { return a + l.orders; }, 0);
+    T.uAvg = legs.length ? T.uSum / legs.length : 0;
+    T.firmUtil = al.firmUtil; T.sectorUtil = al.sectorUtil; T.sectorUtilMax = al.sectorUtilMax; T.stress = stress; T.M = Mnow;
+    T.firmUsed = T.insured / RC.FIRM_LIMIT;
     var cashRate = T.policies ? T.cashers / T.policies : 0;
-    var lineRate = T.orders ? (T.wait + T.surge) / T.orders : 0;
+    var lineRate = T.legOrders ? (T.wait + T.surge) / T.legOrders : 0;
     var drop = clamp(-mkt / 3, 0, 1), rally = clamp(mkt / 2, 0, 1);
     var fear = 0.40 * pIns + 0.20 * cashRate + 0.15 * lineRate + 0.15 * drop + 0.10 * H - 0.25 * rally;
     var index = clamp(100 / (1 + Math.exp(8 * (fear - 0.15))), 0, 100);
@@ -82,8 +129,10 @@
     if (shortBase <= 0) { status = 'Covered: premiums cover payouts'; ok = 'ok'; }
     else if (shortBase <= T.uplift) { status = 'Covered: reserve absorbs payouts'; ok = 'ok'; }
     else { status = 'Not covered: ' + Math.round(shortBase - T.uplift).toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }) + ' would come from general capital'; ok = 'bad'; }
+    var moves = {}; legs.forEach(function (l) { if (DEMO.indexOf(l.d.t) >= 0) moves[l.d.t] = l.x; });
     return { index: index, band: band(index), fear: fear, mood: mood, overlay: overlay, mkt: mkt, H: H, pIns: pIns, cashRate: cashRate, lineRate: lineRate, drop: drop, rally: rally,
-      legs: legs, T: T, orders: orders, status: status, ok: ok, net: T.prem - T.pay, reserveUsed: Math.max(0, Math.min(T.uplift, shortBase)) };
+      legs: legs, T: T, orders: orders, status: status, ok: ok, net: T.prem - T.pay, reserveUsed: Math.max(0, Math.min(T.uplift, shortBase)),
+      moves: moves, downShare: legs.length ? down / legs.length : 0, nNames: legs.length };
   }
 
   /* Running book for the session (since page load / demo reset). compute() above is a what-if snapshot that is
@@ -157,5 +206,5 @@
   /** a single sale outside the crowd model (the demo user's own cash-out): shares at K, market S */
   function addSale(B, t, sh, K, S) { invAdd(B, t, sh, K, S); B.inv[t].px = S; return mark(B); }
 
-  g.PCConfidence = { compute: compute, newBook: newBook, accrue: accrue, addSale: addSale, CFG: CFG, BANDS: BANDS, band: band };
+  g.PCConfidence = { crowd: CROWD, compute: compute, newBook: newBook, accrue: accrue, addSale: addSale, CFG: CFG, BANDS: BANDS, band: band };
 })(window);

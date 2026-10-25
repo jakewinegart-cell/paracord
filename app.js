@@ -1,10 +1,10 @@
-/* Paracord — DEMO app logic. Simulated prices only; no real accounts, trades or market data. */
+/* Paracord — DEMO app logic. Simulated prices (random walk seeded from a demo snapshot, as of Oct 23, 2026); no real accounts, trades or live market data. */
 (function () {
   'use strict';
   var STOCKS = window.PC_STOCKS, BROKERS = window.PC_BROKERS;
   var BY_T = {}; STOCKS.forEach(function (s) { BY_T[s.t] = s; });
   var BY_B = {}; BROKERS.forEach(function (b) { BY_B[b.id] = b; });
-  var KEY = 'paracord-demo-v2';
+  var KEY = 'paracord-demo-v3'; // p9: new state (snapshot prices, lock vol); p8 state is not migrated
   var DAY = 24 * 3600 * 1000, MIN = 60000;
   var NEWS_TAU_MIN = 20, NEWS_WINDOW_MIN = 30; // per paracord-pricing-v1.md
   var RC = window.PARACORD_RATE_CONSTANTS;
@@ -14,11 +14,11 @@
   function freshState() {
     var holdings = [];
     window.PC_DEFAULT_LINKED.forEach(function (id) { BY_B[id].demo.forEach(function (h) { holdings.push({ acct: id, t: h[0], sh: h[1] }); }); });
-    return { v: 2, linked: window.PC_DEFAULT_LINKED.slice(), holdings: holdings, ins: {}, news: {}, clock: { offset: 0, speed: 1 }, px: {}, open: {}, receipts: [] };
+    return { v: 3, linked: window.PC_DEFAULT_LINKED.slice(), holdings: holdings, ins: {}, news: {}, clock: { offset: 0, speed: 1 }, px: {}, open: {}, receipts: [] };
   }
   var state;
   try { state = JSON.parse(localStorage.getItem(KEY)) || freshState(); } catch (e) { state = freshState(); }
-  if (state.v !== 2) state = freshState();
+  if (state.v !== 3) state = freshState();
   function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
 
   if (!state.conf) state.conf = { target: 0, mood: 0, open: null };
@@ -27,8 +27,12 @@
   if (state.paid == null) state.paid = Object.keys(state.ins).reduce(function (a, t) { return a + state.ins[t].gross; }, 0);
   if (state.rebated == null) state.rebated = Object.keys(state.ins).reduce(function (a, t) { return a + (state.ins[t].rebates || 0); }, 0);
   var confHist = [], confNoise = 0, confLast = null, invHist = [], confBook = window.PCConfidence ? window.PCConfidence.newBook() : null; // book resets on page load / demo reset
-  var sim = new window.PCSim(STOCKS, state.px);
-  STOCKS.forEach(function (s) { if (!state.open[s.t]) state.open[s.t] = sim.hist(s.t)[0]; });
+  // p9: the sim runs the whole demo-snapshot universe (factor model: market + sector + idiosyncratic) so the crowd book and
+  // crash scenarios move together; only the four demo tickers keep a chart history and persisted prices.
+  var ALL = window.PC_UNIVERSE_DEFS && window.PC_UNIVERSE_DEFS.length ? window.PC_UNIVERSE_DEFS : STOCKS;
+  function newSim(px) { var s = new window.PCSim(ALL, px, { histFor: STOCKS.map(function (x) { return x.t; }) }); var o = {}; ALL.forEach(function (d) { o[d.t] = s.price(d.t); }); s.openAll = o; return s; }
+  var sim = newSim(state.px);
+  STOCKS.forEach(function (s) { if (!state.open[s.t]) state.open[s.t] = sim.price(s.t); });
 
   var lastReal = Date.now();
   function simNow() { return Date.now() + state.clock.offset; }
@@ -55,7 +59,7 @@
     return {
       price: sim.price(t), shares: opt.shares != null ? opt.shares : (ins ? ins.shares : sharesOf(t)),
       lockIn: opt.lockIn != null ? opt.lockIn : (ins ? ins.lockIn : sim.price(t)),
-      sigma1: sim.sigma1(t), float: d.float, adv: d.adv, news: newsScore(t),
+      volatility: lockVolNow(t).used, float: d.float, adv: d.adv, news: newsScore(t), // p9: unlocked preview at the lock vol
       inCompletedDayBlock: false, // D_t applied as a rebate at block end (see accrue)
       elapsedMs: ins ? simNow() - ins.enabledAt : 0,
       // v4 rate lock: S, sigma_1 and H frozen at lock start; taper day n and floor clock tau from the lock's tenure
@@ -63,7 +67,18 @@
     };
   }
   function tenure(ins, at) { var e = Math.max(0, (at == null ? simNow() : at) - ins.enabledAt); return { day: Math.floor(e / DAY) + 1, tau: e / DAY / 252, e: e }; }
-  function lockNow(t) { return { price: sim.price(t), sigma1: sim.sigma1(t), news: newsScore(t), at: simNow() }; }
+  /** p9 lock vol: max(recent realized (sim EWMA, floored at the 20-day vol), options-implied incl. earnings bump) */
+  function lockVolNow(t) { return window.paracordLockVol(BY_T[t], { at: simNow(), rv: sim.recentVol(t) }); }
+  function lockNow(t) {
+    var lv = lockVolNow(t);
+    return { price: sim.price(t), volatility: lv.used, lv: { used: lv.used, rv: lv.rv, iv: lv.iv, ivBase: lv.ivBase, earnInside: lv.earnInside, earnDate: lv.earnDate, bumpPts: lv.bumpPts, source: lv.source, ivSrc: lv.ivSrc }, news: newsScore(t), at: simNow() };
+  }
+  function pct0(x) { return Math.round(x * 100) + '%'; }
+  function volUsedText(lv) {
+    if (!lv) return '';
+    return pct0(lv.used) + ' (higher of recent ' + pct0(lv.rv) + ' / options-implied ' + pct0(lv.iv) + ')' +
+      (lv.earnInside ? ' · implied includes earnings ' + new Date(lv.earnDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' (+' + (lv.bumpPts * 100).toFixed(1) + ' pts)' : '');
+  }
   /* per-person caps (rate.js CAP_PER_STOCK / CAP_TOTAL): insured value = K x shares, per verified person, not per account */
   function otherInsured(t) { return Object.keys(state.ins).reduce(function (a, u) { return u === t ? a : a + state.ins[u].lockIn * state.ins[u].shares; }, 0); }
   function capFor(t, K) { return window.paracordCapShares(K, sharesOf(t), otherInsured(t)); }
@@ -211,7 +226,7 @@
       '<div class="badges" style="margin-top:10px">' + (state.linked.length ? state.linked.map(function (a) { return bb(a); }).join('') : '<span class="muted">No accounts linked</span>') + '</div></div>' +
       '<h3 class="muted small" style="margin:16px 4px 8px;text-transform:uppercase;letter-spacing:.6px">Your stocks · live (simulated)</h3>' +
       (held.length ? held.map(stockRow).join('') : '<div class="card center muted">Link a demo account to see holdings.</div>') +
-      '<div class="footer-note">Demo — simulated prices, no real trades. Paracord is a prototype; nothing here is investment or insurance advice.</div>';
+      '<div class="footer-note">Demo — simulated prices starting from a demo snapshot, as of Oct 23, 2026 (not live data); no real trades. Paracord is a prototype; nothing here is investment or insurance advice.</div>';
   }
 
   function insuranceCard(t) {
@@ -258,7 +273,7 @@
     return '<div class="card breakdown"><details class="how" open><summary>How this rate is computed</summary>' +
       '<div class="formula">R = min($6, max($0.002, c·E·L·(1+3H)·f(n)·D, 1.15·N·ΔP<sub>BS</sub>))\nc = 0.0029/min · h = 390 min · f(n) = max(√n − √(n−1), 0.05)\nS, σ₁, H locked at start · n = day of the lock</div>' +
       '<div data-live="breakdown:' + t + '"></div>' +
-      '<div class="small muted" style="margin-top:8px">Draft pricing v4 (placeholder, rate.js → insuranceRatePerMinute; paracord-pricing-v4.md). F and ADV are simulated demo values. Demo clock: one 24h sim-day counts as one trading day.</div></details></div>';
+      '<div class="small muted" style="margin-top:8px">Draft pricing v4 with the p9 volatility lock (placeholder, rate.js → insuranceRatePerMinute; paracord-pricing-v4.md). Prices, implied vol, F (shares outstanding) and ADV come from a demo snapshot, as of Oct 23, 2026 (not live; some values estimated); MOON is fictional. Demo clock: one 24h sim-day counts as one trading day.</div></details></div>';
   }
 
   function viewStock(t) {
@@ -307,7 +322,7 @@
   }
   function viewDemo() {
     return '<div class="demo-tag">DEMO MENU</div><p class="muted small">Everything in Paracord is simulated: prices are a random walk, accounts and holdings are fake, and no trade ever happens.</p>' + demoControls() +
-      '<div class="card small"><h3>Simulated stocks</h3>' + STOCKS.map(function (s) { return '<div class="kv"><span class="k">' + s.t + ' · ' + s.tag + '</span><span class="v">σ ' + Math.round(s.vol * 100) + '% · F ' + big(s.float) + ' · ADV ' + big(s.adv) + '</span></div>'; }).join('') + '</div>';
+      '<div class="card small"><h3>Demo stocks</h3><div class="small muted" style="margin-bottom:6px">Reference data: <b>' + (window.PC_SNAPSHOT_LABEL || 'demo snapshot') + '</b>, not live. Prices then move as a simulated random walk. Engine universe: ' + ALL.length + ' names.</div>' + STOCKS.map(function (s) { return '<div class="kv"><span class="k">' + s.t + ' · ' + s.tag + (s.fictional ? ' (fictional)' : '') + '</span><span class="v">' + money(s.p0, 2) + ' · implied ' + pct0(s.iv) + (s.iv_src === 'assumed' ? ' (assumed)' : s.iv_src === 'chain' ? '' : ' (est.)') + ' · realized 20d ' + pct0(s.vol20) + (s.earn ? ' · earnings ' + s.earn.slice(5) : '') + ' · shares ' + big(s.float) + ' · ADV ' + big(s.adv) + '</span></div>'; }).join('') + '</div>';
   }
 
   /* ---------- sheets ---------- */
@@ -421,20 +436,21 @@
     function cm(x) { var v = Math.abs(x), s = v >= 1e9 ? (v / 1e9).toFixed(2) + 'B' : v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : v >= 1e4 ? (v / 1e3).toFixed(0) + 'K' : Math.round(v).toLocaleString(); return '$' + s; }
     function cs(x) { return (x >= 0 ? '+' : '−') + cm(x); }
     function csh(x) { return x >= 1e6 ? (x / 1e6).toFixed(2) + 'M' : x >= 1e4 ? (x / 1e3).toFixed(0) + 'K' : Math.round(x).toLocaleString(); }
-    var rows = tks.sort(function (x, y) { return B.inv[y].value - B.inv[x].value; }).map(function (t) {
+    var sorted = tks.sort(function (x, y) { return B.inv[y].value - B.inv[x].value; }), more = sorted.length - 10;
+    var rows = sorted.slice(0, 10).map(function (t) {
       var I = B.inv[t], p = I.value - I.cost, w = B.invValue ? I.value / B.invValue : 0;
       return '<tr data-inv="' + t + '"><td><b>' + t + '</b></td><td class="r" data-inv-sh="' + I.sh + '">' + Math.round(I.sh).toLocaleString() + '</td><td class="r">$' + (I.cost / I.sh).toFixed(2) + '</td><td class="r">$' + I.px.toFixed(2) + '</td>' +
         '<td class="r">' + cm(I.value) + '</td><td class="r ' + (p >= 0 ? 'up' : 'down') + '">' + cs(p) + '</td>' +
         '<td class="r"><span class="inv-bar"><i style="width:' + (w * 100).toFixed(1) + '%"></i></span>' + Math.round(w * 100) + '%</td></tr>';
     }).join('');
-    return top + '<div class="inv-scroll"><table class="inv-tbl"><thead><tr><th>Stock</th><th class="r">Shares</th><th class="r">Avg cost</th><th class="r">Price</th><th class="r">Value</th><th class="r">P/L</th><th class="r">% inv.</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    return top + '<div class="inv-scroll"><table class="inv-tbl"><thead><tr><th>Stock</th><th class="r">Shares</th><th class="r">Avg cost</th><th class="r">Price</th><th class="r">Value</th><th class="r">P/L</th><th class="r">% inv.</th></tr></thead><tbody>' + rows + '</tbody></table>' + (more > 0 ? '<div class="small muted" style="margin-top:6px">+ ' + more + ' more names (' + tks.length + ' in total)</div>' : '') + '</div>';
   }
   function invLive() { var el = document.getElementById('inv-body'); if (el) el.innerHTML = invBody(); }
 
   /* ---------------- User Confidence Index (demo) ---------------- */
   function confCtx() {
-    return { mood: state.conf.mood, noise: confNoise, price: function (t) { return sim.price(t); }, open: function (t) { return state.open[t]; },
-      sigma1: function (t) { return sim.sigma1(t); }, news: newsScore };
+    return { mood: state.conf.mood, noise: confNoise, price: function (t) { return sim.price(t); }, open: function (t) { return state.open[t] || sim.openAll[t]; },
+      sigma1: function (t) { return sim.sigma1(t); }, news: function (t) { return BY_T[t] ? newsScore(t) : 0; }, has: function (t) { return sim.has(t); }, at: simNow() };
   }
   function confCompute() { if (!window.PCConfidence) return null; confLast = window.PCConfidence.compute(confCtx()); if (state.conf.open == null) { state.conf.open = confLast.index; } return confLast; }
   function confCard() {
@@ -442,14 +458,15 @@
     function b(v, l) { return '<button class="' + (Math.abs(tg - v) < 0.001 ? 'on' : '') + '" data-act="conf" data-v="' + v + '">' + l + '</button>'; }
     return '<div class="card conf" id="conf-card"><div class="row between"><h3 style="margin:0">User Confidence Index</h3><span class="demo-tag">DEMO DATA</span></div>' +
       '<div id="conf-body"></div>' +
-      '<div class="conf-ctl"><div class="small muted" style="margin:10px 0 6px">Demo scenario</div><div class="seg" id="conf-seg">' + b(-0.5, 'Panic day') + b(0, 'Normal') + b(1, 'Euphoria') + '</div>' +
+      '<div class="conf-ctl"><div class="small muted" style="margin:10px 0 6px">Demo scenario</div><div class="seg" id="conf-seg">' + b(-1, 'Crash') + b(-0.5, 'Panic day') + b(0, 'Normal') + b(1, 'Euphoria') + '</div>' +
       '<label class="small muted conf-sl" for="confSlider">Crowd mood &amp; market move <b id="conf-sl-v"></b></label>' +
       '<input type="range" id="confSlider" min="-100" max="100" step="5" value="' + Math.round(tg * 100) + '" aria-label="Crowd mood and market move"></div>' +
       '<details class="how small"><summary>How it\'s computed</summary><div class="muted">' +
-      'Demo crowd of 100,000 Paracord users, each holding 100 shares of every demo stock, cushion 5% below the open; covered shares are capped per verified person at $' + RC.CAP_PER_STOCK.toLocaleString() + ' per stock and $' + RC.CAP_TOTAL.toLocaleString() + ' in total (K × shares). ' +
+      'Demo crowd of 100,000 Paracord users with sampled portfolios: each holds one or two of the demo stocks plus one to three S&amp;P 500 names (picked mostly by market cap), about $4,000 per name, cushion 5% below the open' + (window.PCConfidence.crowd ? ' (' + window.PCConfidence.crowd.names.length + ' names held, ' + window.PCConfidence.crowd.avgNames.toFixed(1) + ' per user)' : '') + '; covered shares are capped per verified person at $' + RC.CAP_PER_STOCK.toLocaleString() + ' per stock and $' + RC.CAP_TOTAL.toLocaleString() + ' in total (K × shares). ' +
       'Share of users turning insurance on = logistic(−1 − 0.9·move<sub>σ</sub> + 1.6·H − 1.4·mood + noise). ' +
       'Fear = 0.40·insured share + 0.20·cash-in rate + 0.15·waiting-line/surge share + 0.15·drop + 0.10·news H − 0.25·rally; Index = 100 / (1 + e<sup>8·(fear − 0.15)</sup>). ' +
-      'Resilience is a running book for this session: every sim-minute, premiums accrue = open policies × their v4 rate, locked when they turned insurance on (users who join later lock at the conditions then), × the duration taper, never below 1.15 × the put-value floor (plus surge uplift, which goes to the reserve), within the 1%-of-float capacity cap (half of over-capacity users surge, the rest wait). ' +
+      'Resilience is a running book for this session: every sim-minute, premiums accrue = open policies × their v4 rate, locked when they turned insurance on (users who join later lock at the conditions then), × the duration taper, never below 1.15 × the put-value floor (plus surge uplift, which goes to the reserve), within firm-wide limits on insured value: per name min(10% of the $' + (RC.FIRM_LIMIT / 1e6) + 'M firm limit, 10% of its daily $ volume), 25% per sector, and the firm total (demo values). Half of over-capacity users surge, the rest wait; the surge multiplier follows book-wide stress (firm/sector use + index drop), so a crash raises prices on all names together. ' +
+      'Rates lock at max(recent realized, options-implied) volatility. Scenarios move the simulated market factor: every name moves by its fitted market loading, so a crash hits all stocks together (some more than others). ' +
       'Every user who turns insurance on pays the $' + RC.MEMBERSHIP_FEE + ' annual membership up front; it is non-refundable, so it is counted as cash kept with no refund liability (for accounting it is earned over 12 months). ' +
       'Cash-ins are optional and physically settled: below the cushion some users cash in each minute; Paracord pays them K × shares and takes the shares into its inventory (see the next card). Open exposure = the loss if every open policy cashed in now, (K − S) per share. Premiums in, cash out and inventory shares only grow; the index, inventory value and open exposure move freely. Not a forecast.</div></details></div>';
   }
@@ -475,10 +492,16 @@
       '<div class="stat"><div class="k">Membership fees · non-refundable</div><div class="v" id="conf-memb">' + m(B.membership || 0) + '</div><div class="small muted">' + Math.round(B.members || 0).toLocaleString() + ' members × $' + (B.fee || RC.MEMBERSHIP_FEE) + ' annual, paid up front · kept, no refund liability</div></div>' +
       '<div class="stat"><div class="k">Open exposure</div><div class="v" id="conf-open">' + m(B.open) + '</div><div class="small muted">loss if all ' + Math.round(B.openPol).toLocaleString() + ' open policies cashed in now (cash needed ' + m(B.openCash) + ')</div></div>' +
       '</div><div class="row between" style="margin-top:8px"><b>Net position</b><b class="' + (B.net >= 0 ? 'up' : 'down') + '" id="conf-net">' + sg(B.net) + '</b></div>' +
-      '<div class="small muted" style="margin-top:4px">Net position = premiums + membership fees − cash paid + inventory at market · rates locked at start (v4) · status: net position vs open exposure (surge reserve ' + m(B.reserve) + ', target ' + m(T.target) + ') · capacity use ' + Math.round(T.uMax * 100) + '%, ' + Math.round(T.wait).toLocaleString() + ' waiting · resets on page load · scenarios change rates going forward, not past collections · nothing auto-sells</div></div>';
+      '<div class="small muted" style="margin-top:4px">Net position = premiums + membership fees − cash paid + inventory at market · rates locked at start (v4) · status: net position vs open exposure (surge reserve ' + m(B.reserve) + ', target ' + m(T.target) + ') · firm limit use ' + Math.round((T.firmUtil || 0) * 100) + '%, worst sector ' + Math.round((T.sectorUtilMax || 0) * 100) + '%, book stress ' + (T.stress || 0).toFixed(2) + (T.M > 1 ? ' → surge ×' + T.M.toFixed(2) + ' on new locks' : '') + ', ' + Math.round(T.wait).toLocaleString() + ' waiting · resets on page load · scenarios change rates going forward, not past collections · nothing auto-sells</div></div>';
     return '<div class="conf-top"><div><div class="big conf-num">' + v.toFixed(0) + '</div>' +
       '<div class="small"><b>' + r.band + '</b> · <span class="' + (d >= 0 ? 'up' : 'down') + '">' + (d >= 0 ? '+' : '−') + Math.abs(d).toFixed(1) + ' vs open</span></div></div>' + spark + '</div>' + gauge +
-      '<div class="small muted conf-drv">Insured ' + Math.round(r.pIns * 100) + '% of users · cash-ins ' + Math.round(r.cashRate * 100) + '% · waiting/surge ' + Math.round(r.lineRate * 100) + '% · market ' + (r.mkt >= 0 ? '+' : '−') + Math.abs(r.mkt).toFixed(1) + 'σ · news H ' + r.H.toFixed(2) + '</div>' + res;
+      '<div class="small muted conf-drv">Insured ' + Math.round(r.pIns * 100) + '% of users · cash-ins ' + Math.round(r.cashRate * 100) + '% · waiting/surge ' + Math.round(r.lineRate * 100) + '% · market ' + (r.mkt >= 0 ? '+' : '−') + Math.abs(r.mkt).toFixed(1) + 'σ · news H ' + r.H.toFixed(2) + '</div>' + movesHtml(r) + res;
+  }
+  function movesHtml(r) {
+    if (!r.moves) return '';
+    var ks = STOCKS.map(function (s) { return s.t; }).filter(function (t) { return r.moves[t] != null; });
+    return '<div class="conf-moves small" id="conf-moves"><span class="muted">Moves vs open (correlated sim):</span> ' + ks.map(function (t) { var x = Math.exp(r.moves[t]) - 1; return '<b>' + t + '</b> <span class="' + (x >= 0 ? 'up' : 'down') + '">' + (x >= 0 ? '+' : '−') + Math.abs(x * 100).toFixed(1) + '%</span>'; }).join(' · ') +
+      ' · <span class="muted">' + Math.round(r.downShare * 100) + '% of ' + r.nNames + ' names down</span></div>';
   }
   function confSliderLabel(v) { var mv = v < 0 ? v * 3 : v * 1.5; return (v < -0.6 ? 'Extreme panic' : v < -0.2 ? 'Panic' : v > 0.6 ? 'Euphoria' : v > 0.2 ? 'Upbeat' : 'Normal') + ' · market ' + (mv >= 0 ? '+' : '−') + Math.abs(mv).toFixed(1) + 'σ'; }
   function confLive() {
@@ -510,8 +533,10 @@
     var b = breakdown(t), d = BY_T[t], ins = state.ins[t];
     var blocks = ins ? ins.blocksDone : 0, lk = ins && ins.lock;
     function term(sym, name, val, ex) { return '<div class="term"><span class="sym">' + sym + '</span><div><b>' + name + '</b><div class="ex">' + ex + '</div></div><span class="val">' + val + '</span></div>'; }
-    return term('E', 'Expected shortfall (at lock)', money(b.E, 2), 'N·S·σ<sub>h</sub>·G(z) = ' + (ins ? ins.shares : 0) + ' × ' + money(b.S_rate, 2) + ' × ' + (b.sigma_h * 100).toFixed(2) + '% × ' + b.G.toFixed(4) + '<br>S = max(price at lock, K) · σ₁ ' + (b.sigma1 * 100).toFixed(3) + '%/min at lock · z = ' + b.z.toFixed(2)) +
-      term('L', 'Liquidity factor', '×' + b.L.toFixed(3), 'max(1,(1B/F)^0.1)·(1+10·N/ADV) = ' + b.Lfloat.toFixed(3) + ' × ' + b.Lsize.toFixed(4) + '<br>F ' + big(d.float) + ' · ADV ' + big(d.adv) + ' (simulated)') +
+    var lvb = lk && lk.lv ? lk.lv : lockVolNow(t);
+    return term('σ', 'Volatility used (at lock)', pct0(b.sigAnn), 'Volatility used: ' + volUsedText(lvb) + '. The same σ sets the base rate and the put-value floor, so the price stays above the comparable put even in a calm week. Implied vol: ' + (d.iv_src === 'chain' ? 'backed out of listed Nov-20 put prices' : d.iv_src === 'assumed' ? 'assumed (fictional stock)' : 'estimated') + ', ' + (window.PC_SNAPSHOT_LABEL || 'demo snapshot') + '.') +
+      term('E', 'Expected shortfall (at lock)', money(b.E, 2), 'N·S·σ<sub>h</sub>·G(z) = ' + (ins ? ins.shares : 0) + ' × ' + money(b.S_rate, 2) + ' × ' + (b.sigma_h * 100).toFixed(2) + '% × ' + b.G.toFixed(4) + '<br>S = max(price at lock, K) · σ₁ ' + (b.sigma1 * 100).toFixed(3) + '%/min at lock · z = ' + b.z.toFixed(2)) +
+      term('L', 'Liquidity factor', '×' + b.L.toFixed(3), 'max(1,(1B/F)^0.1)·(1+10·N/ADV) = ' + b.Lfloat.toFixed(3) + ' × ' + b.Lsize.toFixed(4) + '<br>F ' + big(d.float) + ' (shares outstanding) · ADV ' + big(d.adv) + (d.fictional ? ' (fictional)' : ' (demo snapshot)')) +
       term('H', 'News score (at lock)', b.H.toFixed(2) + ' → ×' + b.newsFactor.toFixed(2), '1 + 3·H, frozen at lock. A new shock changes new locks and re-locks only.') +
       term('f', 'Duration taper', '×' + b.taper.toFixed(3), 'day ' + b.day + ' of the lock: f(n) = max(√n − √(n−1), 0.05). Day 1 = 1.00, day 2 = 0.41, day 20 = 0.11. Total cost grows like √days, like a put. Turning coverage off resets to day 1.') +
       term('P', 'Put-value floor', money(b.floor, 4) + '/min', '1.15 × N × [P(τ+1 min) − P(τ)], Black-Scholes put at S, K, σ from the lock; τ = ' + (b.tau * 252).toFixed(2) + ' trading days covered. A minimum, not a target: the price never drops below the comparable put (cumulative ≥ 1.15 × the put).' + (b.clampedTo === 'putfloor' ? ' <b>Binds now.</b>' : '')) +
@@ -525,7 +550,7 @@
       case 'chg': el.className = (el.className.replace(/\b(up|down)\b/g, '') + ' ' + cls(chg(t))).trim(); return pct(chg(t)) + ' today';
       case 'value': return money(sharesOf(t) * sim.price(t), 2);
       case 'shares': return sharesOf(t) + ' sh';
-      case 'vol': return 'Realized vol ' + Math.round(annVol(t) * 100) + '% (σ₁ ' + (sim.sigma1(t) * 100).toFixed(3) + '%/min)';
+      case 'vol': var lvv = lockVolNow(t); return 'Vol used ' + pct0(lvv.used) + ' · recent ' + pct0(lvv.rv) + ' / implied ' + pct0(lvv.iv);
       case 'total': return money(totals().v, 2);
       case 'protected': return money(totals().p, 2);
       case 'totalrate': return rateStr(totals().r);
@@ -547,7 +572,7 @@
       case 'rate': return rateStr(rateOf(t));
       case 'ratetenure': var bt = breakdown(t); return '<b>Day ' + bt.day + ' of your lock</b> · tenure discount ' + (bt.taper < 1 ? '−' + Math.round((1 - bt.taper) * 100) + '%' : 'starts day 2 (−59%)') + ' (taper ×' + bt.taper.toFixed(3) + ')' + (bt.clampedTo === 'putfloor' ? ' · put-value floor applies' : bt.clampedTo === 'cap' ? ' · at $6/min cap' : '');
       case 'ratesub': var b = breakdown(t), lk = ins.lock || {};
-        return 'Rate locked at start: S ' + money(b.S_rate, 2) + ' · σ ' + Math.round(b.sigAnn * 100) + '% · news H ' + (lk.news || 0).toFixed(2) + ' (' + new Date(lk.at || ins.enabledAt).toLocaleString() + ', sim). Price moves don\'t change it. ≈ ' + money(b.rate / 60, 5) + '/sec';
+        return 'Rate locked at start: S ' + money(b.S_rate, 2) + ' · σ ' + (lk.lv ? volUsedText(lk.lv) : Math.round(b.sigAnn * 100) + '%') + ' · news H ' + (lk.news || 0).toFixed(2) + ' (' + new Date(lk.at || ins.enabledAt).toLocaleString() + ', sim). Price moves don\'t change it. ≈ ' + money(b.rate / 60, 5) + '/sec';
       case 'cost': return money(ins.gross != null ? ins.gross : ins.cost) + (ins.rebates > 0 ? ' (−' + money(ins.rebates) + ' rebate)' : '');
       case 'elapsed': return dur(simNow() - ins.enabledAt);
       case 'newspill': var h = newsScore(t); return h > 0.01 ? '<span class="pill news">⚡ News H ' + h.toFixed(2) + '</span>' : '';
@@ -650,7 +675,7 @@
       case 'skip': accrue(); state.clock.offset += +el.dataset.ms; accrue(); save(); live(); toast('⏩ Skipped ' + (+el.dataset.ms === DAY ? '24 hours' : '1 hour') + ' (demo clock)'); break;
       case 'speed': state.clock.speed = +el.dataset.x; save(); render.noScroll = true; render(); break;
       case 'reset':
-        if (el.dataset.armed) { localStorage.removeItem(KEY); state = freshState(); state.conf = { target: 0, mood: 0, open: null }; confHist = []; confLast = null; confBook = window.PCConfidence ? window.PCConfidence.newBook() : null; state.paid = 0; state.rebated = 0; state.cash = 0; invHist = []; sim = new window.PCSim(STOCKS, {}); STOCKS.forEach(function (s) { state.open[s.t] = sim.hist(s.t)[0]; }); save(); replace({ view: 'home' }); toast('Demo reset'); }
+        if (el.dataset.armed) { localStorage.removeItem(KEY); state = freshState(); state.conf = { target: 0, mood: 0, open: null }; confHist = []; confLast = null; confBook = window.PCConfidence ? window.PCConfidence.newBook() : null; state.paid = 0; state.rebated = 0; state.cash = 0; invHist = []; sim = newSim({}); window.__paracord.sim = sim; STOCKS.forEach(function (s) { state.open[s.t] = sim.price(s.t); }); save(); replace({ view: 'home' }); toast('Demo reset'); }
         else { el.dataset.armed = '1'; el.textContent = 'Tap again to reset everything'; }
         break;
       case 'cashout': go({ view: 'cashout', t: t, step: 'summary', n: state.ins[t].shares, flow: Date.now().toString(36) }); break;
@@ -699,6 +724,7 @@
     STOCKS.forEach(function (s) { state.px[s.t] = sim.price(s.t); });
     // confidence index: ease the crowd mood toward the chosen scenario, small AR(1) noise, then record the session sparkline
     state.conf.mood += (state.conf.target - state.conf.mood) * 0.25;
+    sim.setScenario(state.conf.mood < 0 ? state.conf.mood * 3 : state.conf.mood * 1.5); // p9: scenario drives the sim's market factor
     confNoise = 0.92 * confNoise + 0.12 * (Math.random() + Math.random() + Math.random() - 1.5) * 2;
     var cr = confCompute(); if (cr) { confHist.push(cr.index); if (confHist.length > 240) confHist.shift(); if (confBook) { window.PCConfidence.accrue(confBook, cr, 1); invHist.push(confBook.invValue); if (invHist.length > 240) invHist.shift(); } } // 1 tick = 1 sim trading minute
     accrue(); save(); live();

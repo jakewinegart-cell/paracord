@@ -5,18 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#ffffff">
 <title>Paracord — Demo stock insurance</title>
-<link rel="icon" type="image/svg+xml" href="logo-badge.svg?v=p8">
-<link rel="icon" type="image/png" sizes="32x32" href="favicon-32-badge.png?v=p8">
-<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon-badge.png?v=p8">
-<link rel="stylesheet" href="styles.css?v=p8">
-<link rel="stylesheet" href="projections.css?v=p8">
+<link rel="icon" type="image/svg+xml" href="logo-badge.svg?v=p9">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32-badge.png?v=p9">
+<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon-badge.png?v=p9">
+<link rel="stylesheet" href="styles.css?v=p9">
+<link rel="stylesheet" href="projections.css?v=p9">
 </head>
 <body>
 <div id="app" class="phone">
-  <div class="demo-banner" role="note">DEMO — simulated prices, no real trades</div>
+  <div class="demo-banner" role="note">DEMO — simulated prices from a demo snapshot, as of Oct 23, 2026 · no real trades</div>
   <header class="topbar">
     <button id="backBtn" class="icon-btn" aria-label="Back" hidden>&#8592;</button>
-    <div class="brand" id="brand"><img class="logo" src="logo-badge.svg?v=p8" alt="" width="32" height="32"><span>Paracord</span></div>
+    <div class="brand" id="brand"><img class="logo" src="logo-badge.svg?v=p9" alt="" width="32" height="32"><span>Paracord</span></div>
     <div class="title" id="title"></div>
     <button id="demoChip" class="demo-chip" aria-label="Open demo menu">DEMO ⚙</button>
   </header>
@@ -31,11 +31,12 @@
   <div id="sheetRoot"></div>
   <div id="toast" role="status" aria-live="polite"></div>
 </div>
-<script src="rate.js?v=p8"></script>
-<script src="data.js?v=p8"></script>
-<script src="sim.js?v=p8"></script>
-<script src="projections.js?v=p8"></script>
-<script src="confidence.js?v=p8"></script>
-<script src="app.js?v=p8"></script>
+<script src="rate.js?v=p9"></script>
+<script src="data/universe.js?v=p9"></script>
+<script src="data.js?v=p9"></script>
+<script src="sim.js?v=p9"></script>
+<script src="projections.js?v=p9"></script>
+<script src="confidence.js?v=p9"></script>
+<script src="app.js?v=p9"></script>
 </body>
 </html>
