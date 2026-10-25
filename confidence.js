@@ -77,36 +77,58 @@
   }
 
   /* Running book for the session (since page load / demo reset). compute() above is a what-if snapshot that is
-   * recomputed every tick, so its totals move both ways; the dashboard shows this book instead:
+   * recomputed every tick, so its totals move both ways; the dashboard shows this book instead.
+   * Physical settlement: on cash-in Paracord pays K × shares in cash and takes the shares into inventory.
    *  - collected: premiums actually accrued so far = Σ open policies × live base rate (+ surge uplift) × elapsed minutes. Never decreases.
    *  - reserve:   the surge-uplift part of collected (100% to the risk reserve). Never decreases.
-   *  - paid:      cash-ins actually paid so far, (K − S) × 100 per cashing policy. Never decreases.
-   *  - open:      open exposure = what Paracord would owe now if every still-open policy cashed in, (K − S)+ × 100 (moves up and down).
+   *  - cashOut:   cash paid for cash-in purchases, K × shares. Never decreases.
+   *  - inventory: shares bought on cash-in (only ever increase; nothing auto-sells), cost basis K, value at acquisition S,
+   *               marked to market every tick at the live price. Immediate economic loss at cash-in = (K − S) × shares.
+   *  - open:      open exposure = economic loss if every still-open policy cashed in now, (K − S)+ × 100 (moves up and down);
+   *               openCash = cash that would need to go out for those, K × 100 on in-the-money policies.
+   *  - net:       net position = collected − cashOut + inventory market value.
    * Scenario buttons / slider only change the rates going forward. */
-  function newBook() { return { minutes: 0, collected: 0, base: 0, reserve: 0, paid: 0, cashedPol: 0, open: 0, openPol: 0, legs: {} }; }
+  function newBook() { return { minutes: 0, collected: 0, base: 0, reserve: 0, cashOut: 0, cashedPol: 0, open: 0, openCash: 0, openPol: 0, inv: {}, invValue: 0, invCost: 0, invAcq: 0, legs: {} }; }
+  function invAdd(B, t, sh, K, S) {
+    if (!(sh > 0)) return;
+    var I = B.inv[t] || (B.inv[t] = { sh: 0, cost: 0, acq: 0, px: S });
+    I.sh += sh; I.cost += sh * K; I.acq += sh * S; B.cashOut += sh * K;
+    if (I.px == null) I.px = S;
+  }
+  function mark(B) {
+    var v = 0, c = 0, a = 0;
+    Object.keys(B.inv).forEach(function (t) { var I = B.inv[t]; I.value = I.sh * I.px; v += I.value; c += I.cost; a += I.acq; });
+    B.invValue = v; B.invCost = c; B.invAcq = a;
+    B.net = B.collected - B.cashOut + v;
+    var res = B.net - B.open, resBase = res - B.reserve, fmt = function (x) { return Math.round(x).toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }); };
+    if (B.minutes === 0 && !c) { B.ok = 'ok'; B.status = 'Collecting…'; }
+    else if (resBase >= 0) { B.ok = 'ok'; B.status = 'Covered: net position covers open exposure'; }
+    else if (res >= 0) { B.ok = 'ok'; B.status = 'Covered: surge reserve absorbs the gap'; }
+    else { B.ok = 'bad'; B.status = 'Not covered: ' + fmt(-res) + ' would come from general capital'; }
+    return B;
+  }
   function accrue(B, r, dtMin) {
     if (!r || !(dtMin > 0)) return B;
-    var open = 0, openPol = 0;
+    var open = 0, openCash = 0, openPol = 0;
     r.legs.forEach(function (l) {
-      var L = B.legs[l.d.t] || (B.legs[l.d.t] = { cashed: 0, collected: 0, paid: 0 });
+      var t = l.d.t, L = B.legs[t] || (B.legs[t] = { cashed: 0, collected: 0 });
       var pol = Math.max(0, l.pol - L.cashed);                    // insured crowd minus those who already cashed in
       var basePrem = pol * l.base1 * dtMin;                         // live per-minute base rate at the current price
       var uplift = l.pol ? basePrem * l.f.sumMm1 / l.pol : 0;      // surge users pay Base × (M − 1) on top → reserve
       var cashers = l.S < l.K ? pol * Math.min(1, l.cashFrac * dtMin / CFG.cashInMin) : 0; // optional exercise, spread over the session
-      var pay = cashers * CFG.shares * Math.max(0, l.K - l.S);
-      L.cashed += cashers; L.collected += basePrem + uplift; L.paid += pay;
-      B.base += basePrem; B.reserve += uplift; B.collected += basePrem + uplift; B.paid += pay; B.cashedPol += cashers;
+      L.cashed += cashers; L.collected += basePrem + uplift;
+      B.base += basePrem; B.reserve += uplift; B.collected += basePrem + uplift; B.cashedPol += cashers;
+      if (B.inv[t]) B.inv[t].px = l.S;
+      invAdd(B, t, cashers * CFG.shares, l.K, l.S);                // pay K × shares, receive the shares
       var still = pol - cashers;
-      openPol += still; open += still * CFG.shares * Math.max(0, l.K - l.S); // owed now if every open policy cashed in
+      openPol += still; open += still * CFG.shares * Math.max(0, l.K - l.S);
+      if (l.S < l.K) openCash += still * CFG.shares * l.K;
     });
-    B.minutes += dtMin; B.open = open; B.openPol = openPol;
-    var need = B.paid + B.open, fmt = function (x) { return Math.round(x).toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }); };
-    if (B.base >= need) { B.ok = 'ok'; B.status = 'Covered: premiums collected cover paid + open exposure'; }
-    else if (B.collected >= need) { B.ok = 'ok'; B.status = 'Covered: surge reserve absorbs the gap'; }
-    else { B.ok = 'bad'; B.status = 'Not covered: ' + fmt(need - B.collected) + ' would come from general capital'; }
-    B.net = B.collected - B.paid;
-    return B;
+    B.minutes += dtMin; B.open = open; B.openCash = openCash; B.openPol = openPol;
+    return mark(B);
   }
+  /** a single sale outside the crowd model (the demo user's own cash-out): shares at K, market S */
+  function addSale(B, t, sh, K, S) { invAdd(B, t, sh, K, S); B.inv[t].px = S; return mark(B); }
 
-  g.PCConfidence = { compute: compute, newBook: newBook, accrue: accrue, CFG: CFG, BANDS: BANDS, band: band };
+  g.PCConfidence = { compute: compute, newBook: newBook, accrue: accrue, addSale: addSale, CFG: CFG, BANDS: BANDS, band: band };
 })(window);

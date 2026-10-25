@@ -124,3 +124,15 @@ details.how[open] summary::after{content:"▴"}
 .conf-status.bad{background:var(--accent);color:#fff}
 .conf-sl{display:flex;justify-content:space-between;gap:8px;margin-top:10px}
 .conf .how{margin-top:4px}
+
+/* p7: Paracord-owned stock inventory */
+.inv-num{font-size:32px;line-height:1.1}
+.inv-scroll{overflow-x:auto;margin-top:10px;border:1px solid var(--line);border-radius:12px;background:#fff}
+.inv-tbl{width:100%;border-collapse:collapse;font-size:11px;font-variant-numeric:tabular-nums}
+.inv-tbl th{font-size:10px;color:var(--muted);font-weight:700;text-align:left;padding:6px 4px;border-bottom:1px solid var(--line);white-space:nowrap}
+.inv-tbl td{padding:6px 4px;border-bottom:1px solid var(--panel2);white-space:nowrap}
+.inv-tbl tr:last-child td{border-bottom:0}
+.inv-tbl .r{text-align:right}
+.inv-bar{display:inline-block;width:18px;height:6px;border-radius:3px;background:var(--panel2);margin-right:4px;vertical-align:middle;overflow:hidden}
+.inv-bar i{display:block;height:100%;background:#111}
+.inv .btn[disabled]{opacity:.45;cursor:not-allowed;width:auto}

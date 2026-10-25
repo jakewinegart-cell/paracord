@@ -24,7 +24,7 @@
   Object.keys(state.ins).forEach(function (t) { var i = state.ins[t]; if (i.gross == null) i.gross = i.cost + (i.rebates || 0); });
   if (state.paid == null) state.paid = Object.keys(state.ins).reduce(function (a, t) { return a + state.ins[t].gross; }, 0);
   if (state.rebated == null) state.rebated = Object.keys(state.ins).reduce(function (a, t) { return a + (state.ins[t].rebates || 0); }, 0);
-  var confHist = [], confNoise = 0, confLast = null, confBook = window.PCConfidence ? window.PCConfidence.newBook() : null; // book resets on page load / demo reset
+  var confHist = [], confNoise = 0, confLast = null, invHist = [], confBook = window.PCConfidence ? window.PCConfidence.newBook() : null; // book resets on page load / demo reset
   var sim = new window.PCSim(STOCKS, state.px);
   STOCKS.forEach(function (s) { if (!state.open[s.t]) state.open[s.t] = sim.hist(s.t)[0]; });
 
@@ -163,8 +163,9 @@
   function viewHome() {
     var held = heldTickers();
     return '<div class="card hero"><div class="small" style="opacity:.8">Total holdings (simulated)</div><div class="big" data-live="total"></div>' +
-      '<div class="row between small" style="margin-top:8px"><span>Protected: <b data-live="protected"></b></span><span>Insurance: <b data-live="totalrate"></b></span></div></div>' +
-      confCard() +
+      '<div class="row between small" style="margin-top:8px"><span>Protected: <b data-live="protected"></b></span><span>Insurance: <b data-live="totalrate"></b></span></div>' +
+      (state.cash > 0 ? '<div class="row between small" style="margin-top:6px"><span>Cash from shares sold to Paracord</span><b>' + money(state.cash, 2) + '</b></div>' : '') + '</div>' +
+      confCard() + invCard() +
       '<div class="card"><div class="row between"><h3 style="margin:0">Linked accounts</h3><button class="btn sm ghost" data-act="link">+ Link account</button></div>' +
       '<div class="badges" style="margin-top:10px">' + (state.linked.length ? state.linked.map(function (a) { return bb(a); }).join('') : '<span class="muted">No accounts linked</span>') + '</div></div>' +
       '<h3 class="muted small" style="margin:16px 4px 8px;text-transform:uppercase;letter-spacing:.6px">Your stocks · live (simulated)</h3>' +
@@ -303,11 +304,11 @@
     if (route.step === 'receipt') {
       var r = state.receipts.filter(function (x) { return x.ref === route.ref; })[0];
       if (!r) return '<div class="card">Receipt not found.</div>';
-      return '<div class="demo-tag" style="display:block;text-align:center">DEMO — no real trade</div><div class="check">✓</div><h2 class="center" style="margin:0">Cash-out complete (demo)</h2>' +
+      return '<div class="demo-tag" style="display:block;text-align:center">DEMO — no real trade</div><div class="check">✓</div><h2 class="center" style="margin:0">Sold to Paracord at ' + money(r.K, 2) + ' (demo)</h2>' +
         '<p class="center muted small">Ref <b class="num" style="color:#111111">' + r.ref + '</b><br>' + new Date(r.at).toLocaleString() + ' (sim clock)</p>' +
         '<div class="card">' + kv('Stock', r.t + ' · ' + BY_T[r.t].name.replace(/ \(.*\)/, '')) + kv('Shares sold to Paracord', r.n) + kv('Lock-in price', money(r.K, 2)) + kv('Market price at execution', money(r.S, 2)) +
         kv('Payout', money(r.payout, 2)) + kv('Insurance cost settled', '−' + money(r.cost)) + kv('Net', money(r.net, 2), 'total') + kv('vs selling at market', '<span class="' + cls(r.payout - r.market) + '">' + signed(r.payout - r.market) + '</span>') + '</div>' +
-        '<div class="small muted center" style="margin-bottom:12px">Simulated receipt. No shares moved and no money was paid.</div><button class="btn" data-act="receipt-done">Done</button>';
+        '<div class="small muted center" style="margin-bottom:12px">' + r.n + ' ' + r.t + ' shares left your demo holdings and ' + money(r.net, 2) + ' was added to your demo cash. Paracord now holds these shares. Simulated receipt: no shares moved and no money was paid.</div><button class="btn" data-act="receipt-done">Done</button>';
     }
     var ins = state.ins[t];
     if (!ins) return '<div class="card">This holding is not insured.</div>';
@@ -342,10 +343,45 @@
     var left = n;
     state.holdings.forEach(function (h) { if (h.t === t && left > 0 && state.linked.indexOf(h.acct) >= 0) { var x = Math.min(h.sh, left); h.sh -= x; left -= x; } });
     ins.cost -= c.cost; ins.shares -= n;
+    state.cash = (state.cash || 0) + c.net; // sold to Paracord at K: shares leave holdings, cash (net of settled premium) added
+    if (confBook && window.PCConfidence.addSale) window.PCConfidence.addSale(confBook, t, n, c.K, c.S);
     if (ins.shares <= 0) delete state.ins[t];
     doneFlows[route.flow] = true; save();
     replace({ view: 'cashout', t: t, step: 'receipt', ref: ref, flow: route.flow });
   }
+
+  /* ---------------- Paracord-owned stock (demo inventory from cash-ins) ---------------- */
+  function invCard() {
+    return '<div class="card inv" id="inv-card"><div class="row between"><h3 style="margin:0">Paracord-owned stock (from cash-ins)</h3><span class="demo-tag">DEMO DATA</span></div><div id="inv-body"></div>' +
+      '<div class="row between" style="margin-top:10px"><span class="small muted">Selling inventory isn\'t built in the demo; nothing auto-sells.</span><button class="btn sm ghost" disabled title="Coming soon">Sell · coming soon</button></div>' +
+      '<details class="how small"><summary>How it\'s computed</summary><div class="muted">When a user cashes in, Paracord pays them their cash-in line price K for each share and receives the shares (physical settlement). ' +
+      'The immediate economic loss at cash-in is (K − S) per share, where S is the market price then; the shares are booked at cost K (value at purchase S). After that the inventory rides the market: ' +
+      'it is marked to market every tick at the live demo price (including the scenario move), so its value goes up and down while the share count only grows. Unrealized P/L = market value − cost paid; change today = market value − value at purchase. Resets on page load. Demo data, not a forecast.</div></details></div>';
+  }
+  function invBody() {
+    var B = confBook; if (!B) return '';
+    function m(x) { return '$' + Math.round(x).toLocaleString(); }
+    function sg(x) { return (x >= 0 ? '+' : '−') + m(Math.abs(x)); }
+    var tks = Object.keys(B.inv).filter(function (t) { return B.inv[t].sh > 0; });
+    var pl = B.invValue - B.invCost, today = B.invValue - B.invAcq;
+    var h = invHist.length > 1 ? invHist : [B.invValue, B.invValue], mn = Math.min.apply(null, h), mx = Math.max.apply(null, h), rg = mx - mn || 1;
+    var pts = h.map(function (x, i) { return (i * 120 / (h.length - 1)).toFixed(1) + ',' + (34 - (x - mn) / rg * 30).toFixed(1); }).join(' ');
+    var top = '<div class="conf-top"><div><div class="small muted">Market value now</div><div class="big inv-num" id="inv-value">' + m(B.invValue) + '</div>' +
+      '<div class="small">Cost paid ' + m(B.invCost) + ' · <span class="' + (pl >= 0 ? 'up' : 'down') + '" id="inv-pl">' + sg(pl) + ' unrealized</span> · <span class="' + (today >= 0 ? 'up' : 'down') + '">' + sg(today) + ' today</span></div></div>' +
+      '<svg class="conf-spark" viewBox="0 0 120 36" preserveAspectRatio="none" aria-label="Inventory value this session"><polyline points="' + pts + '" fill="none" stroke="#111111" stroke-width="1.6" vector-effect="non-scaling-stroke"/></svg></div>';
+    if (!tks.length) return top + '<div class="small muted" style="margin-top:10px">No cash-ins yet this session. Try the Panic day scenario.</div>';
+    function cm(x) { var v = Math.abs(x), s = v >= 1e9 ? (v / 1e9).toFixed(2) + 'B' : v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : v >= 1e4 ? (v / 1e3).toFixed(0) + 'K' : Math.round(v).toLocaleString(); return '$' + s; }
+    function cs(x) { return (x >= 0 ? '+' : '−') + cm(x); }
+    function csh(x) { return x >= 1e6 ? (x / 1e6).toFixed(2) + 'M' : x >= 1e4 ? (x / 1e3).toFixed(0) + 'K' : Math.round(x).toLocaleString(); }
+    var rows = tks.sort(function (x, y) { return B.inv[y].value - B.inv[x].value; }).map(function (t) {
+      var I = B.inv[t], p = I.value - I.cost, w = B.invValue ? I.value / B.invValue : 0;
+      return '<tr data-inv="' + t + '"><td><b>' + t + '</b></td><td class="r" data-inv-sh="' + I.sh + '">' + Math.round(I.sh).toLocaleString() + '</td><td class="r">$' + (I.cost / I.sh).toFixed(2) + '</td><td class="r">$' + I.px.toFixed(2) + '</td>' +
+        '<td class="r">' + cm(I.value) + '</td><td class="r ' + (p >= 0 ? 'up' : 'down') + '">' + cs(p) + '</td>' +
+        '<td class="r"><span class="inv-bar"><i style="width:' + (w * 100).toFixed(1) + '%"></i></span>' + Math.round(w * 100) + '%</td></tr>';
+    }).join('');
+    return top + '<div class="inv-scroll"><table class="inv-tbl"><thead><tr><th>Stock</th><th class="r">Shares</th><th class="r">Avg cost</th><th class="r">Price</th><th class="r">Value</th><th class="r">P/L</th><th class="r">% inv.</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+  }
+  function invLive() { var el = document.getElementById('inv-body'); if (el) el.innerHTML = invBody(); }
 
   /* ---------------- User Confidence Index (demo) ---------------- */
   function confCtx() {
@@ -366,7 +402,7 @@
       'Share of users turning insurance on = logistic(−1 − 0.9·move<sub>σ</sub> + 1.6·H − 1.4·mood + noise). ' +
       'Fear = 0.40·insured share + 0.20·cash-in rate + 0.15·waiting-line/surge share + 0.15·drop + 0.10·news H − 0.25·rally; Index = 100 / (1 + e<sup>8·(fear − 0.15)</sup>). ' +
       'Resilience is a running book for this session: every sim-minute, premiums accrue = open policies × the live v3 base rate (plus surge uplift, which goes to the reserve), within the 1%-of-float capacity cap (half of over-capacity users surge, the rest wait). ' +
-      'Cash-ins are optional: below the cushion some users cash in each minute and are paid (K − S) per share; the rest keep coverage. Open exposure = what would be owed now if every open policy cashed in at (K − S) per share. Premiums in and payouts out only grow; the index and open exposure move freely. Not a forecast.</div></details></div>';
+      'Cash-ins are optional and physically settled: below the cushion some users cash in each minute; Paracord pays them K × shares and takes the shares into its inventory (see the next card). Open exposure = the loss if every open policy cashed in now, (K − S) per share. Premiums in, cash out and inventory shares only grow; the index, inventory value and open exposure move freely. Not a forecast.</div></details></div>';
   }
   function confBody(r) {
     var C = window.PCConfidence, T = r.T, v = r.index, d = v - state.conf.open;
@@ -378,14 +414,18 @@
     function m(x) { return '$' + Math.round(x).toLocaleString(); }
     var B = confBook || { minutes: 0, collected: 0, reserve: 0, paid: 0, open: 0, openPol: 0, cashedPol: 0, net: 0, ok: 'ok', status: 'Collecting…' };
     if (!B.status) { B.ok = 'ok'; B.status = 'Collecting…'; B.net = 0; }
+    var B = confBook || window.PCConfidence.newBook();
+    if (!B.status) { B.ok = 'ok'; B.status = 'Collecting…'; B.net = 0; }
+    function sg(x) { return (x >= 0 ? '+' : '−') + m(Math.abs(x)); }
     var res = '<div class="conf-res"><div class="row between"><b>Paracord resilience · this session</b><span class="small muted">demo book · ' + Math.round(B.minutes) + ' sim-min</span></div>' +
       '<div class="conf-status ' + B.ok + '">' + (B.ok === 'ok' ? '✓ ' : '✕ ') + B.status + '</div>' +
       '<div class="grid2" style="margin-top:8px">' +
-      '<div class="stat"><div class="k">Premiums in</div><div class="v" id="conf-prem">' + m(B.collected) + '</div><div class="small muted">collected so far · incl. ' + m(B.reserve) + ' surge</div></div>' +
-      '<div class="stat"><div class="k">Payouts out</div><div class="v' + (B.paid > B.collected ? ' down' : '') + '" id="conf-paid">' + m(B.paid) + '</div><div class="small muted">cash-ins paid so far · ' + Math.round(B.cashedPol).toLocaleString() + ' policies</div></div>' +
-      '<div class="stat"><div class="k">Open exposure</div><div class="v" id="conf-open">' + m(B.open) + '</div><div class="small muted">owed if all ' + Math.round(B.openPol).toLocaleString() + ' open policies cashed in now</div></div>' +
-      '<div class="stat"><div class="k">Surge reserve</div><div class="v" id="conf-res">' + m(B.reserve) + '</div><div class="small muted">target ' + m(T.target) + ' · cap use ' + Math.round(T.uMax * 100) + '% · ' + Math.round(T.wait).toLocaleString() + ' waiting</div></div>' +
-      '</div><div class="small muted" style="margin-top:6px">Net (collected − paid) ' + (B.net >= 0 ? '+' : '−') + m(Math.abs(B.net)) + ' · cover check: collected (incl. reserve) vs paid + open exposure · resets on page load · scenarios change the rate going forward, not past collections · cash-ins are optional, nothing auto-sells</div></div>';
+      '<div class="stat"><div class="k">Cash in · premiums</div><div class="v" id="conf-prem">' + m(B.collected) + '</div><div class="small muted">collected so far · incl. ' + m(B.reserve) + ' surge reserve</div></div>' +
+      '<div class="stat"><div class="k">Cash out · cash-in purchases</div><div class="v" id="conf-paid">' + m(B.cashOut) + '</div><div class="small muted">paid K × shares · ' + Math.round(B.cashedPol).toLocaleString() + ' policies</div></div>' +
+      '<div class="stat"><div class="k">Stock inventory</div><div class="v" id="conf-inv">' + m(B.invValue) + '</div><div class="small muted">market value now · cost ' + m(B.invCost) + '</div></div>' +
+      '<div class="stat"><div class="k">Open exposure</div><div class="v" id="conf-open">' + m(B.open) + '</div><div class="small muted">loss if all ' + Math.round(B.openPol).toLocaleString() + ' open policies cashed in now (cash needed ' + m(B.openCash) + ')</div></div>' +
+      '</div><div class="row between" style="margin-top:8px"><b>Net position</b><b class="' + (B.net >= 0 ? 'up' : 'down') + '" id="conf-net">' + sg(B.net) + '</b></div>' +
+      '<div class="small muted" style="margin-top:4px">Net position = premiums − cash paid + inventory at market · status: net position vs open exposure (surge reserve ' + m(B.reserve) + ', target ' + m(T.target) + ') · capacity use ' + Math.round(T.uMax * 100) + '%, ' + Math.round(T.wait).toLocaleString() + ' waiting · resets on page load · scenarios change rates going forward, not past collections · nothing auto-sells</div></div>';
     return '<div class="conf-top"><div><div class="big conf-num">' + v.toFixed(0) + '</div>' +
       '<div class="small"><b>' + r.band + '</b> · <span class="' + (d >= 0 ? 'up' : 'down') + '">' + (d >= 0 ? '+' : '−') + Math.abs(d).toFixed(1) + ' vs open</span></div></div>' + spark + '</div>' + gauge +
       '<div class="small muted conf-drv">Insured ' + Math.round(r.pIns * 100) + '% of users · cash-ins ' + Math.round(r.cashRate * 100) + '% · waiting/surge ' + Math.round(r.lineRate * 100) + '% · market ' + (r.mkt >= 0 ? '+' : '−') + Math.abs(r.mkt).toFixed(1) + 'σ · news H ' + r.H.toFixed(2) + '</div>' + res;
@@ -394,7 +434,7 @@
   function confLive() {
     var body = document.getElementById('conf-body'); if (!body) return;
     var r = confLast || confCompute(); if (!r) return;
-    body.innerHTML = confBody(r);
+    body.innerHTML = confBody(r); invLive();
     var lv = document.getElementById('conf-sl-v'); if (lv) lv.textContent = confSliderLabel(state.conf.target);
   }
   function confSet(v, withNews) {
@@ -541,7 +581,7 @@
       case 'skip': accrue(); state.clock.offset += +el.dataset.ms; accrue(); save(); live(); toast('⏩ Skipped ' + (+el.dataset.ms === DAY ? '24 hours' : '1 hour') + ' (demo clock)'); break;
       case 'speed': state.clock.speed = +el.dataset.x; save(); render.noScroll = true; render(); break;
       case 'reset':
-        if (el.dataset.armed) { localStorage.removeItem(KEY); state = freshState(); state.conf = { target: 0, mood: 0, open: null }; confHist = []; confLast = null; confBook = window.PCConfidence ? window.PCConfidence.newBook() : null; state.paid = 0; state.rebated = 0; sim = new window.PCSim(STOCKS, {}); STOCKS.forEach(function (s) { state.open[s.t] = sim.hist(s.t)[0]; }); save(); replace({ view: 'home' }); toast('Demo reset'); }
+        if (el.dataset.armed) { localStorage.removeItem(KEY); state = freshState(); state.conf = { target: 0, mood: 0, open: null }; confHist = []; confLast = null; confBook = window.PCConfidence ? window.PCConfidence.newBook() : null; state.paid = 0; state.rebated = 0; state.cash = 0; invHist = []; sim = new window.PCSim(STOCKS, {}); STOCKS.forEach(function (s) { state.open[s.t] = sim.hist(s.t)[0]; }); save(); replace({ view: 'home' }); toast('Demo reset'); }
         else { el.dataset.armed = '1'; el.textContent = 'Tap again to reset everything'; }
         break;
       case 'cashout': go({ view: 'cashout', t: t, step: 'summary', n: state.ins[t].shares, flow: Date.now().toString(36) }); break;
@@ -584,7 +624,7 @@
     // confidence index: ease the crowd mood toward the chosen scenario, small AR(1) noise, then record the session sparkline
     state.conf.mood += (state.conf.target - state.conf.mood) * 0.25;
     confNoise = 0.92 * confNoise + 0.12 * (Math.random() + Math.random() + Math.random() - 1.5) * 2;
-    var cr = confCompute(); if (cr) { confHist.push(cr.index); if (confHist.length > 240) confHist.shift(); if (confBook) window.PCConfidence.accrue(confBook, cr, 1); } // 1 tick = 1 sim trading minute
+    var cr = confCompute(); if (cr) { confHist.push(cr.index); if (confHist.length > 240) confHist.shift(); if (confBook) { window.PCConfidence.accrue(confBook, cr, 1); invHist.push(confBook.invValue); if (invHist.length > 240) invHist.shift(); } } // 1 tick = 1 sim trading minute
     accrue(); save(); live();
   }
 
