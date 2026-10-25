@@ -8,7 +8,9 @@
  *   E = N * S * sigma_h * G(z), sigma_h = sigma_1 * sqrt(390), z = (S - K)/(S * sigma_h)
  *   G(z) = phi(z) - z(1 - Phi(z)),  L = max(1,(F_ref/F)^0.1) * (1 + 10 N/ADV)
  *
- * v4 changes (plus a variance split: sigma_1 is session-only vol; 24/7 = session + night = one trading day):
+ * Full-day pricing (2026-10-25): sigma_1 = vol / sqrt(252*390) (session priced on a full day's variance, as in v3) and
+ * the overnight lump is the stand-alone v3 gap ES on a full day's variance. The 1.15x put floor is a minimum only.
+ * v4 changes:
  *  1. Duration taper.  Day n of an unbroken lock (n = 1 on the first trading day; turning coverage
  *     off resets n to 1) is billed at Base_raw * f(n), f(n) = max(sqrt(n) - sqrt(n-1), f_min).
  *     f(1) = 1 (day 1 unchanged); sum_{1..n} f = sqrt(n), the way a fixed-strike put scales.
@@ -34,9 +36,14 @@
     R_max: 6.00,       // $/min cap on the base (before surge)
     D_full_day: 0.90,  // 10% off the base part for a completed 24h block
     taper_min: 0.05,   // f(n) never below 0.05 (reached at n ~ 100 trading days)
-    floor_mult: 1.15,  // cumulative charge >= 1.15 x matching put value
-    w_session: 0.75,   // share of a trading day's close-to-close variance in the 6.5h session (floor clock)
-    w_night: 0.25,     // share in the overnight gap; 24/7 coverage = 1.00 trading day of variance per day
+    floor_mult: 1.15,  // minimum only: cumulative charge never below 1.15 x the matching put value (not a target)
+    // Full-day pricing (chosen 2026-10-25, as in v3): the session and the overnight gap are EACH priced on a full
+    // trading day of variance. w_* are the pricing weights (sigma_1 and the night lump); var_* are the physical split
+    // used only for the put-floor clock and expected-loss estimates, so the floor matches the comparable listed put.
+    w_session: 1,      // pricing: session priced on a full day's variance (v4 draft had 0.75)
+    w_night: 1,        // pricing: overnight gap priced on a full day's variance, stand-alone (v4 draft had 0.25, incremental)
+    var_session: 0.75, // physical share of close-to-close variance in the 6.5h session (floor clock / loss model)
+    var_night: 0.25,   // physical share in the overnight gap; 24/7 coverage = 1.00 trading day of variance per day
     night_cap: 6.00 * 60 * 17.5, // overnight lump cap before surge ($360/h x 17.5h, v3 sec. 6)
     MIN_PER_YEAR: 252 * 390,
     CAP_PER_STOCK: 5000,   // $ insured value (K x shares) per person per stock
@@ -74,7 +81,7 @@
     var lk = o.lock || null;
     var Snow = +o.price, N = +o.shares, K = +(o.lockIn || o.price);
     // sigma_1 is intraday (session) per-minute vol. From an annual close-to-close vol (IV or realized) it is
-    // vol * sqrt(w_session / (252*390)): the session carries ~75% of daily variance, the night gap the rest.
+    // vol * sqrt(w_session / (252*390)); full-day pricing (w_session = 1) prices the session on a full day's variance.
     function s1of(src) { return src.sigma1 != null ? +src.sigma1 : (src.volatility != null ? +src.volatility * Math.sqrt(C.w_session / C.MIN_PER_YEAR) : null); }
     var sigma1Now = s1of(o); if (sigma1Now == null) sigma1Now = 0.2 * Math.sqrt(C.w_session / C.MIN_PER_YEAR);
     var S = lk ? Math.max(+lk.price, K) : Snow;
@@ -125,7 +132,7 @@
    * Charge for taper day n of a lock, at trading-day granularity (used by Projections, the confidence book and
    * the put comparison). sessMin = covered session minutes that day (390 = full session); nightBase = the
    * untapered v3 overnight lump for that night (0 = no overnight coverage); D = full-day discount on the base part.
-   * Floor clock: covered variance per day w = w_session * sessMin/390 + w_night * [night covered]; the floor for day n is
+   * Floor clock (physical split): w = var_session * sessMin/390 + var_night * [night covered]; the floor for day n is
    * 1.15 N [P(n w / 252) - P((n-1) w / 252)], so the cumulative floor through day n is 1.15 N P(n w / 252).
    */
   function dayCharge(o, n, sessMin, nightBase, D, opt) {
@@ -134,7 +141,7 @@
     var N = +o.shares, K = +(o.lockIn || o.price);
     // covered variance time for this day, in years: an average 24/7 day = 1/252; opt.wYears overrides (e.g. calendar
     // time cal_days/365 when matching a dated put across a weekend)
-    var wY = opt.wYears != null ? opt.wYears : (C.w_session * sessMin / 390 + (nightBase > 0 ? C.w_night : 0)) / 252;
+    var wY = opt.wYears != null ? opt.wYears : (C.var_session * sessMin / 390 + (nightBase > 0 ? C.var_night : 0)) / 252;
     var t1 = opt.tauStart != null ? opt.tauStart : (n - 1) * wY;
     var fl = N > 0 && wY > 0 ? floorCharge(N, b.S_rate, K, b.sigAnn || 0, t1, t1 + wY) : 0;
     var base = D * b.taper * (b.baseRaw * sessMin + nightBase);
@@ -143,6 +150,8 @@
   }
 
   /**
+   * Full-day pricing (w_night = 1, default): stand-alone v3 gap ES, night = 1.12 * L * (1+3H) * N * S * sg G(zg),
+   * sg = sigma sqrt(w_night * m / 252). Otherwise (w_night < 1, v4 draft):
    * v4 overnight lump for a 24/7 lock (replaces v3's stand-alone gap ES for nights that follow a covered session):
    * the incremental expected shortfall of adding the gap to the session, so session + night = one day's ES, not
    * sqrt(.75)+sqrt(.25) = 1.37 of it.  night = 1.12 * L * (1+3H) * N * S * [sd G(zd) - ss G(zs)],
@@ -152,8 +161,9 @@
   function nightLump(o, varMult) {
     var b = insuranceRateBreakdown(o); if (!(b.E > 0)) return 0;
     var S = b.S_rate, K = +(o.lockIn || o.price), N = +o.shares, sig = b.sigAnn;
-    var ss = sig * Math.sqrt(C.w_session / 252), sd = sig * Math.sqrt((C.w_session + C.w_night * (varMult || 1)) / 252);
     var es = function (sg) { return sg * G((S - K) / (S * sg)); };
+    if (C.w_night >= 1) return 1.12 * b.L * b.newsFactor * N * S * es(sig * Math.sqrt(C.w_night * (varMult || 1) / 252));
+    var ss = sig * Math.sqrt(C.w_session / 252), sd = sig * Math.sqrt((C.w_session + C.w_night * (varMult || 1)) / 252);
     return 1.12 * b.L * b.newsFactor * N * S * Math.max(0, es(sd) - es(ss));
   }
 

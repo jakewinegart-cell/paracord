@@ -126,7 +126,7 @@
     // every user who turns insurance on buys the annual membership once (non-refundable, kept)
     B.members = Math.max(B.members || 0, r.orders || 0); B.membership = B.members * CFG.fee;
     // v4 taper day and floor clock from the book's minutes (1 tick = 1 trading minute; 390 min = 1 trading day)
-    var day = Math.floor(B.minutes / CFG.session) + 1, tau1 = B.minutes / RC.MIN_PER_YEAR * RC.w_session, tau2 = (B.minutes + dtMin) / RC.MIN_PER_YEAR * RC.w_session;
+    var day = Math.floor(B.minutes / CFG.session) + 1, tau1 = B.minutes / RC.MIN_PER_YEAR * RC.var_session, tau2 = (B.minutes + dtMin) / RC.MIN_PER_YEAR * RC.var_session;
     r.legs.forEach(function (l) {
       var t = l.d.t, L = B.legs[t] || (B.legs[t] = { cashed: 0, collected: 0, pol: 0, rateSum: 0 });
       // policies: locked ones keep their rate; new ones lock at current conditions; users switching off leave pro rata

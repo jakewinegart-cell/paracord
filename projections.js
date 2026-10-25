@@ -83,7 +83,7 @@
     var m = mFull * cov;                                    // covered (billed) session minutes per trading day
     var discEligible = I.overnight && I.hours >= 6.5 && cov >= 1; // unbroken 24h block needs full day + night coverage
     var dfac = discEligible ? 1 - (1 - C.D_full_day) * I.fullDay / 100 : 1;
-    var nl = I.overnight ? g.paracordNightLump(o, 1) : 0;    // untapered v4 night lump (incremental over the session)
+    var nl = I.overnight ? g.paracordNightLump(o, 1) : 0;    // untapered night lump (full-day pricing: stand-alone gap ES on a full day's variance)
     // per-policy charges for policy day n (taper, floor, cap, D on the base part only)
     var cAll = g.paracordDayCharge(o, day, m, nl, dfac), cDay = g.paracordDayCharge(o, day, m, 0, dfac);
     var cAll1 = g.paracordDayCharge(o, day, m, nl, 1), cDay1 = g.paracordDayCharge(o, day, m, 0, 1);
@@ -94,12 +94,12 @@
     var dayUplift = perDay1 * f.sumMm1;                     // surge uplift on the effective (tapered/floored) charge -> reserve
     var dayPrem = dayBase + dayUplift;
     // expected payouts for day n of a lock held since day 1: ES increment over the covered variance (news raises realized vol by (1+H))
-    var wd = C.w_session * m / 390 / 252, wn = I.overnight ? C.w_night / 252 : 0, t0 = (day - 1) * (wd + wn), sl = sigAnn * (1 + H);
+    var wd = C.var_session * m / 390 / 252, wn = I.overnight ? C.var_night / 252 : 0, t0 = (day - 1) * (wd + wn), sl = sigAnn * (1 + H);
     function es(tau) { return tau > 0 ? shortfall(n, S, K, sl * Math.sqrt(tau)) : 0; }
     var lossPerPolicyDay = m > 0 ? es(t0 + wd) - es(t0) : 0;
     var dayLoss = insured * lossPerPolicyDay;
     // ---- night ----
-    var sigmaGap = sigAnn * Math.sqrt(C.w_night / 252);
+    var sigmaGap = sigAnn * Math.sqrt(C.var_night / 252);
     var np = { E: nl / (P.nightLoad * b.L * (1 + 3 * H) || 1), raw: nl, premium: perNight, untapered: nl, sigmaGap: sigmaGap, IM: sigmaGap * 0.798, perHour: perNight / P.Tc, capped: cAll.capBinds };
     var nightBase = I.overnight ? insured * perNight : 0;
     var nightUplift = I.overnight ? perNight1 * f.sumMm1 : 0;
@@ -270,14 +270,14 @@
     h += '<details class="pj-card pj-assume"><summary>Assumptions</summary><ul class="pj-sub">' +
       '<li>Prices are each demo stock\'s simulated reference price (COP $104.80, WMT $98.40, NVDA $182.50, MOON $24.20); σ is its simulated annual vol; F and ADV are simulated. Not market data.</li>' +
       '<li>v4: the rate is locked when coverage starts (S, σ and H at lock; S_eff = max(S, K)); later moves do not reprice it. Policy day n is trading days since the lock; turning coverage off resets it. The base is multiplied by f(n) = max(√n − √(n−1), 0.05), so cumulative base cost grows like √n, like a put.</li>' +
-      '<li>Floor: each day\'s charge is at least 1.15 × N × [P(n·w) − P((n−1)·w)], the Black-Scholes put (σ_annual, r = 0) for the covered variance w = 0.75 × (covered session min / 390) + 0.25 × (night covered), in trading days. Cumulative charge ≥ 1.15 × the put. $6/min cap on the base before surge; $0.002/min operational minimum.</li>' +
-      '<li>Variance split: the session carries 75% of a day\'s close-to-close variance and the overnight gap 25%. σ₁ = σ_annual × √(0.75 / (252·390)); the night lump prices only the gap on top of the session.</li>' +
+      '<li>Floor: each day\'s charge is at least 1.15 × N × [P(n·w) − P((n−1)·w)], the Black-Scholes put (σ_annual, r = 0) for the covered variance w = 0.75 × (covered session min / 390) + 0.25 × (night covered), in trading days. This is a minimum, not a target: the price never drops below the comparable put (cumulative charge ≥ 1.15 × the put). $6/min cap on the base before surge; $0.002/min operational minimum.</li>' +
+      '<li>Full-day pricing: the session and the overnight gap are each priced on a full trading day of variance (as in v3). σ₁ = σ_annual × √(1 / (252·390)); the night lump is the stand-alone gap expected shortfall on a full day\'s variance. The put floor and expected losses use the physical split (session 75%, overnight 25% of a day\'s variance), so the floor matches the comparable listed put.</li>' +
       '<li>Per-person caps: covered shares = floor(min($5,000, $25,000 − insured value in other stocks) / K), per verified person (identity/KYC) — not per account. "All four" fills stocks in order for the $25k total.</li>' +
       '<li>Membership: every user pays the annual fee up front ($49 / $99 / $199). Non-refundable, so it is counted as cash kept with no refund liability; for accounting it is recognized evenly over the 12-month term (fee/365 per day). It is not included in premium or profit KPIs above.</li>' +
       '<li>All users arrive at once, FIFO, identical orders. Open band (u &lt; 0.90): fill if it fits; near cap: fill only if it fits and ≤ 0.5% of Q_max; otherwise the chosen % pay surge (M fixed at the u they bought at; 2.0× if u &lt; 1) and the rest wait. No surge fill may push u above 1.25.</li>' +
       '<li>"All four": every user insures the chosen shares in each stock; each stock has its own pool. Totals add stocks; the bad-gap total assumes all four gap down together.</li>' +
       '<li>Expected loss: the increase in expected shortfall N·S·σ√τ·G(z) over day n\'s covered variance for a lock held since day 1 (σ_gap = σ_annual·√(0.25/252) overnight). News is assumed to raise realized vol by (1+H) for losses; the premium uses (1+3H), locked at start.</li>' +
-      '<li>Overnight = one normal weeknight (T_c 17.5 h, no event), option (a) lump premium (v4: incremental gap ES, tapered, covered by the put floor), capped at $360/h × 17.5 h before surge.</li>' +
+      '<li>Overnight = one normal weeknight (T_c 17.5 h, no event), option (a) lump premium (full-day pricing: stand-alone gap ES on a full day of variance, tapered, never below the put floor), capped at $360/h × 17.5 h before surge.</li>' +
       '<li>10% off applies to base (day and night) only, and only when overnight is on, hours = 6.5 and coverage = 100%, since D needs an unbroken 24 h block.</li>' +
       '<li>Coverage length: insured users hold coverage for 25/50/75/100% of the insured session hours. The base is linear in billed minutes but payouts scale with √time; in v4 the put floor prices short coverage by its covered variance, so partial-day coverage is no longer underpriced. Overnight tail and reserve target are not scaled.</li>' +
       '<li>Optional exercise: K is only the level where users may cash in. No automatic sell and no coverage end at K; payouts are modeled as expected shortfall below K at the end of each covered window (users who keep coverage roll into the next window).</li>' +
