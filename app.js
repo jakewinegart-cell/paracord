@@ -26,7 +26,7 @@
   Object.keys(state.ins).forEach(function (t) { var i = state.ins[t]; if (i.gross == null) i.gross = i.cost + (i.rebates || 0); });
   if (state.paid == null) state.paid = Object.keys(state.ins).reduce(function (a, t) { return a + state.ins[t].gross; }, 0);
   if (state.rebated == null) state.rebated = Object.keys(state.ins).reduce(function (a, t) { return a + (state.ins[t].rebates || 0); }, 0);
-  var confHist = [], confNoise = 0, confLast = null, invHist = [], confBook = window.PCConfidence ? window.PCConfidence.newBook() : null; // book resets on page load / demo reset
+  var netDay = null, confHist = [], confNoise = 0, confLast = null, invHist = [], confBook = window.PCConfidence ? window.PCConfidence.newBook() : null; // book resets on page load / demo reset
   // p9: the sim runs the whole demo-snapshot universe (factor model: market + sector + idiosyncratic) so the crowd book and
   // crash scenarios move together; only the four demo tickers keep a chart history and persisted prices.
   var ALL = window.PC_UNIVERSE_DEFS && window.PC_UNIVERSE_DEFS.length ? window.PC_UNIVERSE_DEFS : STOCKS;
@@ -447,6 +447,62 @@
   }
   function invLive() { var el = document.getElementById('inv-body'); if (el) el.innerHTML = invBody(); }
 
+  /* ---------------- p10: intraday net range (peak / low over the simulated trading day) ----------------
+   * Net today = premiums collected today − cash paid for cash-ins today + market value now of the shares taken in today.
+   * That is the resilience card's Net position without membership fees: membership is a one-off, up-front annual fee that jumps
+   * by millions whenever a scenario brings new users in, so it would hide the intraday shape. Second line: net today − open
+   * exposure (what would be left if every still-open policy cashed in now) - the line a crash pushes down.
+   * The book's trading day is 390 sim-minutes (1 tick = 1 trading minute; confidence.js B.day = floor(minutes / 390) + 1), so the
+   * range resets when the book rolls into a new day and on page load / demo reset (new book). Times are the book's trading clock,
+   * 9:30 + minute of the day. */
+  var NET_SESSION = (window.PCConfidence && window.PCConfidence.CFG.session) || 390;
+  function netSnap(B) { var sh = {}; Object.keys(B.inv || {}).forEach(function (t) { sh[t] = B.inv[t].sh; }); return { col: B.collected || 0, cash: B.cashOut || 0, sh: sh }; }
+  var netLast = null; // book totals at the end of the previous tick = baseline when a new sim day opens
+  function netDayNew(day, S, m) {
+    return { day: day, col0: S.col, cash0: S.cash, sh0: S.sh, hist: [], m: m,
+      net: { cur: 0, hi: -Infinity, hiM: m, lo: Infinity, loM: m }, aft: { cur: 0, hi: -Infinity, hiM: m, lo: Infinity, loM: m } };
+  }
+  function netRec(r, v, m) { r.cur = v; if (v > r.hi) { r.hi = v; r.hiM = m; } if (v < r.lo) { r.lo = v; r.loM = m; } }
+  function netTrack(B) {
+    if (!B) return;
+    var day = Math.floor(Math.max(0, B.minutes - 1e-9) / NET_SESSION) + 1, m = B.minutes - (day - 1) * NET_SESSION;
+    if (!netDay || netDay.day !== day) netDay = netDayNew(day, day === 1 || !netLast ? { col: 0, cash: 0, sh: {} } : netLast, m);
+    var N = netDay, mv = 0;
+    Object.keys(B.inv).forEach(function (t) { mv += (B.inv[t].sh - (N.sh0[t] || 0)) * B.inv[t].px; });
+    var net = (B.collected - N.col0) - (B.cashOut - N.cash0) + mv, aft = net - (B.open || 0);
+    netRec(N.net, net, m); netRec(N.aft, aft, m); N.m = m;
+    N.hist.push([m, net, aft]); if (N.hist.length > NET_SESSION + 2) N.hist.shift();
+    netLast = netSnap(B);
+  }
+  function tradeClock(m) { var t = 9 * 60 + 30 + Math.round(m), h = Math.floor(t / 60), mm = t % 60; return (h > 12 ? h - 12 : h) + ':' + String(mm).padStart(2, '0') + (h >= 12 ? ' pm' : ' am'); }
+  function netRangeHtml(sg) {
+    var N = netDay;
+    if (!N || !N.hist.length) return '<div class="net-range" id="net-range"><div class="small"><b>Net today</b> <span class="muted">· collecting…</span></div></div>';
+    var h = N.hist.length > 1 ? N.hist : [N.hist[0], N.hist[0]];
+    var lo = Math.min(N.net.lo, N.aft.lo), hi = Math.max(N.net.hi, N.aft.hi), rg = hi - lo || 1, W = 120, H = 40;
+    function X(mm) { return (mm / NET_SESSION * W).toFixed(1); }
+    function Y(x) { return (36 - (x - lo) / rg * 32).toFixed(1); }
+    function dot(x, y, c, k) { return '<path class="net-dot-' + k + '" d="M' + x + ' ' + y + 'h0" stroke="' + c + '" stroke-width="6" stroke-linecap="round" vector-effect="non-scaling-stroke"/>'; } // stays round when stretched
+    function line(ix, c, dash) { return '<polyline points="' + h.map(function (p) { return X(p[0]) + ',' + Y(p[ix]); }).join(' ') + '" fill="none" stroke="' + c + '" stroke-width="1.5"' + (dash ? ' stroke-dasharray="3 2"' : '') + ' vector-effect="non-scaling-stroke"/>'; }
+    var zero = lo < 0 && hi > 0 ? '<line x1="0" x2="' + W + '" y1="' + Y(0) + '" y2="' + Y(0) + '" stroke="#d6d6d6" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"/>' : '';
+    var spark = '<svg class="net-spark" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-label="Net today with peak and low">' + zero +
+      line(2, '#c8102e', true) + line(1, '#111111') +
+      dot(X(N.net.hiM), Y(N.net.hi), '#111111', 'peak') + dot(X(N.net.loM), Y(N.net.lo), '#111111', 'low') +
+      dot(X(N.aft.hiM), Y(N.aft.hi), '#c8102e', 'aftpeak') + dot(X(N.aft.loM), Y(N.aft.lo), '#c8102e', 'aftlow') + '</svg>';
+    function row(id, label, sub, R) {
+      return '<div class="net-line" id="' + id + '" data-cur="' + R.cur + '" data-hi="' + R.hi + '" data-lo="' + R.lo + '"><div class="net-lbl"><b>' + label + '</b><div class="small muted">' + sub + '</div></div>' +
+        '<div class="net-cell"><div class="k">Peak</div><div class="v ' + (R.hi >= 0 ? 'up' : 'down') + '">' + sg(R.hi) + '</div><div class="t">' + tradeClock(R.hiM) + '</div></div>' +
+        '<div class="net-cell"><div class="k">Now</div><div class="v ' + (R.cur >= 0 ? 'up' : 'down') + '">' + sg(R.cur) + '</div><div class="t">' + tradeClock(N.m) + '</div></div>' +
+        '<div class="net-cell"><div class="k">Low</div><div class="v ' + (R.lo >= 0 ? 'up' : 'down') + '">' + sg(R.lo) + '</div><div class="t">' + tradeClock(R.loM) + '</div></div></div>';
+    }
+    return '<div class="net-range" id="net-range" data-day="' + N.day + '">' +
+      '<div class="small"><b>Net today</b> <span class="muted">· sim day ' + N.day + ' · ' + tradeClock(0) + '–' + tradeClock(NET_SESSION) + '</span></div>' +
+      '<div class="net-row"><div class="net-lines">' +
+      row('net-today', 'Net', 'premiums − cash paid + shares at market', N.net) +
+      row('net-after', 'After open exposure', 'if every open policy cashed in now', N.aft) +
+      '</div>' + spark + '<div class="net-key small muted"><i class="k1"></i>net <i class="k2"></i>after open exposure · dots = peak &amp; low</div></div></div>';
+  }
+
   /* ---------------- User Confidence Index (demo) ---------------- */
   function confCtx() {
     return { mood: state.conf.mood, noise: confNoise, price: function (t) { return sim.price(t); }, open: function (t) { return state.open[t] || sim.openAll[t]; },
@@ -491,8 +547,8 @@
       '<div class="stat"><div class="k">Stock inventory</div><div class="v" id="conf-inv">' + m(B.invValue) + '</div><div class="small muted">market value now · cost ' + m(B.invCost) + '</div></div>' +
       '<div class="stat"><div class="k">Membership fees · non-refundable</div><div class="v" id="conf-memb">' + m(B.membership || 0) + '</div><div class="small muted">' + Math.round(B.members || 0).toLocaleString() + ' members × $' + (B.fee || RC.MEMBERSHIP_FEE) + ' annual, paid up front · kept, no refund liability</div></div>' +
       '<div class="stat"><div class="k">Open exposure</div><div class="v" id="conf-open">' + m(B.open) + '</div><div class="small muted">loss if all ' + Math.round(B.openPol).toLocaleString() + ' open policies cashed in now (cash needed ' + m(B.openCash) + ')</div></div>' +
-      '</div><div class="row between" style="margin-top:8px"><b>Net position</b><b class="' + (B.net >= 0 ? 'up' : 'down') + '" id="conf-net">' + sg(B.net) + '</b></div>' +
-      '<div class="small muted" style="margin-top:4px">Net position = premiums + membership fees − cash paid + inventory at market · rates locked at start (v4) · status: net position vs open exposure (surge reserve ' + m(B.reserve) + ', target ' + m(T.target) + ') · firm limit use ' + Math.round((T.firmUtil || 0) * 100) + '%, worst sector ' + Math.round((T.sectorUtilMax || 0) * 100) + '%, book stress ' + (T.stress || 0).toFixed(2) + (T.M > 1 ? ' → surge ×' + T.M.toFixed(2) + ' on new locks' : '') + ', ' + Math.round(T.wait).toLocaleString() + ' waiting · resets on page load · scenarios change rates going forward, not past collections · nothing auto-sells</div></div>';
+      '</div><div class="row between" style="margin-top:8px"><b>Net position</b><b class="' + (B.net >= 0 ? 'up' : 'down') + '" id="conf-net">' + sg(B.net) + '</b></div>' + netRangeHtml(sg) +
+      '<div class="small muted" style="margin-top:4px">Net position = premiums + membership fees − cash paid + inventory at market · net today = premiums − cash paid + market value of shares taken in, all for today (membership fees left out: they are one-off), with its peak and low over the simulated trading day (390 sim-min, 9:30–4:00; resets each new sim day and on page load); after open exposure = net today − open exposure · rates locked at start (v4) · status: net position vs open exposure (surge reserve ' + m(B.reserve) + ', target ' + m(T.target) + ') · firm limit use ' + Math.round((T.firmUtil || 0) * 100) + '%, worst sector ' + Math.round((T.sectorUtilMax || 0) * 100) + '%, book stress ' + (T.stress || 0).toFixed(2) + (T.M > 1 ? ' → surge ×' + T.M.toFixed(2) + ' on new locks' : '') + ', ' + Math.round(T.wait).toLocaleString() + ' waiting · resets on page load · scenarios change rates going forward, not past collections · nothing auto-sells</div></div>';
     return '<div class="conf-top"><div><div class="big conf-num">' + v.toFixed(0) + '</div>' +
       '<div class="small"><b>' + r.band + '</b> · <span class="' + (d >= 0 ? 'up' : 'down') + '">' + (d >= 0 ? '+' : '−') + Math.abs(d).toFixed(1) + ' vs open</span></div></div>' + spark + '</div>' + gauge +
       '<div class="small muted conf-drv">Insured ' + Math.round(r.pIns * 100) + '% of users · cash-ins ' + Math.round(r.cashRate * 100) + '% · waiting/surge ' + Math.round(r.lineRate * 100) + '% · market ' + (r.mkt >= 0 ? '+' : '−') + Math.abs(r.mkt).toFixed(1) + 'σ · news H ' + r.H.toFixed(2) + '</div>' + movesHtml(r) + res;
@@ -675,7 +731,7 @@
       case 'skip': accrue(); state.clock.offset += +el.dataset.ms; accrue(); save(); live(); toast('⏩ Skipped ' + (+el.dataset.ms === DAY ? '24 hours' : '1 hour') + ' (demo clock)'); break;
       case 'speed': state.clock.speed = +el.dataset.x; save(); render.noScroll = true; render(); break;
       case 'reset':
-        if (el.dataset.armed) { localStorage.removeItem(KEY); state = freshState(); state.conf = { target: 0, mood: 0, open: null }; confHist = []; confLast = null; confBook = window.PCConfidence ? window.PCConfidence.newBook() : null; state.paid = 0; state.rebated = 0; state.cash = 0; invHist = []; sim = newSim({}); window.__paracord.sim = sim; STOCKS.forEach(function (s) { state.open[s.t] = sim.price(s.t); }); save(); replace({ view: 'home' }); toast('Demo reset'); }
+        if (el.dataset.armed) { localStorage.removeItem(KEY); state = freshState(); state.conf = { target: 0, mood: 0, open: null }; confHist = []; confLast = null; confBook = window.PCConfidence ? window.PCConfidence.newBook() : null; netDay = null; netLast = null; state.paid = 0; state.rebated = 0; state.cash = 0; invHist = []; sim = newSim({}); window.__paracord.sim = sim; STOCKS.forEach(function (s) { state.open[s.t] = sim.price(s.t); }); save(); replace({ view: 'home' }); toast('Demo reset'); }
         else { el.dataset.armed = '1'; el.textContent = 'Tap again to reset everything'; }
         break;
       case 'cashout': go({ view: 'cashout', t: t, step: 'summary', n: state.ins[t].shares, flow: Date.now().toString(36) }); break;
@@ -726,7 +782,7 @@
     state.conf.mood += (state.conf.target - state.conf.mood) * 0.25;
     sim.setScenario(state.conf.mood < 0 ? state.conf.mood * 3 : state.conf.mood * 1.5); // p9: scenario drives the sim's market factor
     confNoise = 0.92 * confNoise + 0.12 * (Math.random() + Math.random() + Math.random() - 1.5) * 2;
-    var cr = confCompute(); if (cr) { confHist.push(cr.index); if (confHist.length > 240) confHist.shift(); if (confBook) { window.PCConfidence.accrue(confBook, cr, 1); invHist.push(confBook.invValue); if (invHist.length > 240) invHist.shift(); } } // 1 tick = 1 sim trading minute
+    var cr = confCompute(); if (cr) { confHist.push(cr.index); if (confHist.length > 240) confHist.shift(); if (confBook) { window.PCConfidence.accrue(confBook, cr, 1); netTrack(confBook); invHist.push(confBook.invValue); if (invHist.length > 240) invHist.shift(); } } // 1 tick = 1 sim trading minute
     accrue(); save(); live();
   }
 
@@ -740,5 +796,5 @@
   setInterval(tick, 1000);
 
   // test/demo hook (read-only helpers)
-  window.__paracord = { state: function () { return state; }, rate: rateOf, breakdown: breakdown, capFor: capFor, isMember: isMember, sim: sim, news: newsScore, confidence: function () { return confLast; }, book: function () { return confBook; } };
+  window.__paracord = { state: function () { return state; }, rate: rateOf, breakdown: breakdown, capFor: capFor, isMember: isMember, sim: sim, news: newsScore, confidence: function () { return confLast; }, book: function () { return confBook; }, netDay: function () { return netDay; } };
 })();
