@@ -52,6 +52,7 @@
   }
   function sharesOf(t) { return shMap()[t] || 0; }
   function acctsOf(t) { var o = []; state.holdings.forEach(function (h) { if (h.t === t && h.sh > 0 && state.linked.indexOf(h.acct) >= 0 && o.indexOf(h.acct) < 0) o.push(h.acct); }); return o; }
+  var nudge = window.PCNudge ? window.PCNudge.create() : null, nudgeMin = 0; // nudge1: coverage nudges (nudge.js); resets on page load / demo reset like the book
   function heldTickers() { var m = shMap(); return Object.keys(m).filter(function (t) { return m[t] > 0 && BY_T[t] && sim.has(t); }).map(function (t) { return BY_T[t]; }); }
   function openOf(t) { return state.open[t] || sim.openAll[t]; }
   function chg(t) { var o = openOf(t), p = sim.price(t); return (p - o) / o; }
@@ -269,13 +270,23 @@
    * The house / backend book moved to the Demo tab. Rows only refresh while on screen (IntersectionObserver) so the full
    * ~504-position list stays smooth on phones; off-screen rows refresh as they scroll into view. */
   function capped(t) { return !state.ins[t] && capFor(t, sim.price(t)) === 0; }
+  /* nudge1: the nudge to show on a row right now (red only while uncovered and not capped, green only while covered), or null */
+  function nudgeOf(t) {
+    var n = nudge && nudge.shown && nudge.shown[t]; if (!n) return null;
+    if (n.kind === 'red' && (state.ins[t] || capped(t))) return null;
+    if (n.kind === 'green' && !state.ins[t]) return null;
+    return n;
+  }
+  function nudgeHtml(n, t) { return n ? '<span class="pf-nudge-txt">' + esc(window.PCNudge.copy(n)) + '</span><button class="pf-nudge-x" data-act="nudge-dismiss" data-t="' + t + '">Not now</button>' : ''; }
+  function nudgeCls(n) { return n ? (n.kind === 'red' ? ' nudge-red' : ' nudge-green') : ''; }
   function pfRow(t) {
-    var d = BY_T[t], ins = state.ins[t], n = sharesOf(t), cp = capped(t);
-    return '<div class="pf-row" role="button" tabindex="0" data-act="open-stock" data-t="' + t + '" data-pf="' + t + '">' +
+    var d = BY_T[t], ins = state.ins[t], n = sharesOf(t), cp = capped(t), ng = nudgeOf(t);
+    return '<div class="pf-row' + nudgeCls(ng) + '" role="button" tabindex="0" data-act="open-stock" data-t="' + t + '" data-pf="' + t + '">' +
       '<div class="pf-id"><div><b>' + t + '</b> <span class="pf-sh' + (ins && ins.shares < n ? ' part' : '') + '" data-pf-sh>' + (ins && ins.shares < n ? ins.shares + '/' : '') + n.toLocaleString() + ' sh</span></div><div class="pf-nm">' + esc(d.name.replace(/ \(.*\)/, '')) + '</div>' + (ins ? '<div class="pf-cov" data-pf-cov></div>' : '') + '</div>' +
       '<div class="pf-q"><div class="pf-v" data-pf-v></div><div class="pf-c" data-pf-c></div></div>' +
       '<button class="toggle sm' + (cp ? ' capped' : '') + '" role="switch" aria-label="Coverage ' + t + '" aria-checked="' + (!!ins) + '"' + (cp ? ' aria-disabled="true" title="Coverage limit"' : '') + ' data-act="toggle-ins" data-t="' + t + '"></button>' +
-      '<button class="pf-sell" data-act="sell" data-t="' + t + '" aria-label="Sell ' + t + '">Sell</button></div>';
+      '<button class="pf-sell" data-act="sell" data-t="' + t + '" aria-label="Sell ' + t + '">Sell</button>' +
+      '<div class="pf-nudge" data-pf-nudge="' + (ng ? ng.kind : '') + '" role="status">' + nudgeHtml(ng, t) + '</div></div>';
   }
   function viewHome() {
     // order by position value, fixed for the session so rows don't jump on re-render (new holdings append; sold ones drop out)
@@ -298,6 +309,11 @@
     if (cv && ins) { var kt = '🔒 ' + money(ins.lockIn, 2) + ' · ' + rateStr(rateOf(t)); if (cv.textContent !== kt) cv.textContent = kt; }
     var sw = el.querySelector('.toggle'), cp = capped(t);
     if (sw.classList.contains('capped') !== cp) { sw.classList.toggle('capped', cp); if (cp) { sw.setAttribute('aria-disabled', 'true'); sw.title = 'Coverage limit'; } else { sw.removeAttribute('aria-disabled'); sw.removeAttribute('title'); } }
+    var nb = el.querySelector('[data-pf-nudge]'); if (!nb) return; // nudge1
+    var ng = nudgeOf(t), nk = ng ? ng.kind : '', nh = nudgeHtml(ng, t);
+    if (nb.dataset.pfNudge !== nk) { nb.dataset.pfNudge = nk; el.classList.toggle('nudge-red', nk === 'red'); el.classList.toggle('nudge-green', nk === 'green'); }
+    var tx = nb.querySelector('.pf-nudge-txt');
+    if (!ng) { if (nb.innerHTML) nb.innerHTML = ''; } else if (!tx) nb.innerHTML = nh; else { var ct2 = window.PCNudge.copy(ng); if (tx.textContent !== ct2) tx.textContent = ct2; }
   }
   function pfSetup() {
     if (pfObs) { pfObs.disconnect(); pfObs = null; } pfVis = {};
@@ -862,7 +878,9 @@
       case 'sell':
         if (!el.dataset.armed) { el.dataset.armed = '1'; el.textContent = 'Sell?'; el.classList.add('armed'); setTimeout(function () { if (el.isConnected) { delete el.dataset.armed; el.textContent = 'Sell'; el.classList.remove('armed'); } }, 3000); break; }
         sellPos(t); break;
+      case 'nudge-dismiss': if (nudge) window.PCNudge.dismiss(nudge, t); pfLive(); break; // "Not now": silenced for the rest of the sim trading day
       case 'toggle-ins':
+        if (nudge) window.PCNudge.coverageChanged(nudge, t); // nudge1: a flip stops that row's nudge at once
         if (!state.ins[t] && el.getAttribute('aria-disabled') === 'true') { enableIns(t); break; } // tabs1: at a per-person cap, stays off
         if (state.ins[t]) disableIns(t);
         else if (!isMember()) { memberPick = 'yearly'; openSheet('member', { t: t }); break; }
@@ -888,7 +906,7 @@
       case 'skip': accrue(); state.clock.offset += +el.dataset.ms; accrue(); save(); live(); toast('⏩ Skipped ' + (+el.dataset.ms === DAY ? '24 hours' : '1 hour') + ' (demo clock)'); break;
       case 'speed': state.clock.speed = +el.dataset.x; save(); render.noScroll = true; render(); break;
       case 'reset':
-        if (el.dataset.armed) { localStorage.removeItem(KEY); state = freshState(); state.conf = { target: 0, mood: 0, open: null }; confHist = []; confLast = null; confBook = window.PCConfidence ? window.PCConfidence.newBook() : null; netDay = null; netLast = null; state.paid = 0; state.rebated = 0; state.cash = 0; invHist = []; pfHist = {}; pfOrder = null; sim = newSim({}); window.__paracord.sim = sim; STOCKS.forEach(function (s) { state.open[s.t] = sim.price(s.t); }); save(); replace({ view: 'home' }); toast('Demo reset'); }
+        if (el.dataset.armed) { localStorage.removeItem(KEY); state = freshState(); state.conf = { target: 0, mood: 0, open: null }; confHist = []; confLast = null; confBook = window.PCConfidence ? window.PCConfidence.newBook() : null; netDay = null; netLast = null; state.paid = 0; state.rebated = 0; state.cash = 0; invHist = []; pfHist = {}; pfOrder = null; nudge = window.PCNudge ? window.PCNudge.create() : null; nudgeMin = 0; sim = newSim({}); window.__paracord.sim = sim; STOCKS.forEach(function (s) { state.open[s.t] = sim.price(s.t); }); save(); replace({ view: 'home' }); toast('Demo reset'); }
         else { el.dataset.armed = '1'; el.textContent = 'Tap again to reset everything'; }
         break;
       case 'cashout': go({ view: 'cashout', t: t, step: 'summary', n: state.ins[t].shares, flow: Date.now().toString(36) }); break;
@@ -942,7 +960,16 @@
     sim.setScenario(state.conf.mood < 0 ? state.conf.mood * 3 : state.conf.mood * 1.5); // p9: scenario drives the sim's market factor
     confNoise = 0.92 * confNoise + 0.12 * (Math.random() + Math.random() + Math.random() - 1.5) * 2;
     var cr = confCompute(); if (cr) { confHist.push(cr.index); if (confHist.length > 240) confHist.shift(); if (confBook) { window.PCConfidence.accrue(confBook, cr, 1); netTrack(confBook); invHist.push(confBook.invValue); if (invHist.length > 240) invHist.shift(); } } // 1 tick = 1 sim trading minute
+    nudgeStep();
     accrue(); save(); live();
+  }
+  /* nudge1: one nudge evaluation per sim trading minute over every held position (not only rows on screen) */
+  function nudgeStep() {
+    if (!nudge) return;
+    nudgeMin += 1;
+    var mins = confBook ? confBook.minutes : nudgeMin, day = tcParts(mins).day;
+    var rows = heldTickers().map(function (d) { return { t: d.t, price: sim.price(d.t), covered: !!state.ins[d.t], capped: capped(d.t) }; });
+    window.PCNudge.step(nudge, day, mins, rows, openOf); // previous close on day 1 = the session's opening price (no prior close in the sim)
   }
 
   // initial route (supports deep links like #/stock/COP)
@@ -955,5 +982,5 @@
   setInterval(tick, 1000);
 
   // test/demo hook (read-only helpers)
-  window.__paracord = { state: function () { return state; }, rate: rateOf, breakdown: breakdown, capFor: capFor, isMember: isMember, sim: sim, news: newsScore, confidence: function () { return confLast; }, book: function () { return confBook; }, netDay: function () { return netDay; } };
+  window.__paracord = { state: function () { return state; }, rate: rateOf, breakdown: breakdown, capFor: capFor, isMember: isMember, sim: sim, news: newsScore, confidence: function () { return confLast; }, book: function () { return confBook; }, netDay: function () { return netDay; }, nudge: function () { return nudge; } };
 })();

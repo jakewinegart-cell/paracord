@@ -212,3 +212,17 @@ details.how[open] summary::after{content:"▴"}
 .pf-strip span{display:block;font-size:11px;color:var(--muted)}
 .pf-strip b{display:block;font-size:13px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pf-cov{font-size:11.5px;color:var(--accent);font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* nudge1: Portfolio coverage nudges (spec paracord-downtrend-nudge.md). Red pulse = uncovered + dropping; green blink = covered + rising. */
+.pf-nudge{grid-column:1/-1;display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:-2px;font-size:12px;line-height:1.3;text-align:right}
+.pf-nudge:empty{display:none}
+.pf-nudge-txt{min-width:0}
+.pf-nudge[data-pf-nudge=red] .pf-nudge-txt{color:#b3261e}
+.pf-nudge[data-pf-nudge=green] .pf-nudge-txt{color:#1a7f37}
+.pf-nudge-x{flex:none;height:24px;border-radius:999px;border:1px solid var(--line);background:transparent;font-size:11.5px;font-weight:700;color:var(--muted);padding:0 10px;cursor:pointer}
+.pf-row.nudge-red{background:#d32f2f0d}
+.pf-row.nudge-green{background:#1a7f370d}
+.pf-row.nudge-red .toggle{animation:nudgeRed 1.4s ease-out infinite}
+.pf-row.nudge-green .toggle{animation:nudgeGreen 1.6s ease-in-out infinite}
+@keyframes nudgeRed{0%{box-shadow:0 0 0 0 #d32f2fcc}70%{box-shadow:0 0 0 9px #d32f2f00}100%{box-shadow:0 0 0 0 #d32f2f00}}
+@keyframes nudgeGreen{0%,100%{box-shadow:0 0 0 2px #1a7f3700}50%{box-shadow:0 0 0 4px #1a7f37b3}}
+@media (prefers-reduced-motion:reduce){.pf-row.nudge-red .toggle,.pf-row.nudge-green .toggle{animation:none}.pf-row.nudge-red .toggle{box-shadow:0 0 0 3px #d32f2fb3}.pf-row.nudge-green .toggle{box-shadow:0 0 0 3px #1a7f37b3}}
