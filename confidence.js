@@ -22,7 +22,13 @@
     surgePct: 0.5,      // over-capacity users who pay surge (rest wait)
     session: 390, cashInMin: 195, // cash-ins assumed at mid-session: they pay 195 min, holders pay 390
     panicSigma: 3, euphoriaSigma: 1.5, // scenario index move at mood −1 / +1, in daily σ (applied to the sim's market factor)
-    fee: (g.PARACORD_RATE_CONSTANTS || {}).MEMBERSHIP_FEE || 99 // annual membership, paid up front, non-refundable
+    fee: (g.PARACORD_RATE_CONSTANTS || {}).MEMBERSHIP_FEE || 99, // Yearly plan fee (kept for older callers)
+    // p12 membership plans (rate.js): Yearly $99 paid up front; Monthly $29.99 billed each month.
+    feeYearly: (g.PARACORD_RATE_CONSTANTS || {}).MEMBERSHIP_YEARLY || 99,
+    feeMonthly: (g.PARACORD_RATE_CONSTANTS || {}).MEMBERSHIP_MONTHLY || 29.99,
+    mixYearly: (g.PARACORD_RATE_CONSTANTS || {}).MEMBER_MIX_YEARLY != null ? g.PARACORD_RATE_CONSTANTS.MEMBER_MIX_YEARLY : 0.7, // DEMO ASSUMPTION
+    churnMonthly: (g.PARACORD_RATE_CONSTANTS || {}).MEMBER_CHURN_MONTHLY != null ? g.PARACORD_RATE_CONSTANTS.MEMBER_CHURN_MONTHLY : 0.08, // DEMO ASSUMPTION, per month
+    monthMin: ((g.PARACORD_RATE_CONSTANTS || {}).MONTH_TRADING_DAYS || 21) * 390 // one sim month of book minutes
   };
   var RC = g.PARACORD_RATE_CONSTANTS;
   var BANDS = [[0, 20, 'Extreme fear'], [20, 40, 'Fear'], [40, 60, 'Neutral'], [60, 80, 'Confident'], [80, 101, 'Euphoric']];
@@ -145,11 +151,14 @@
    *               marked to market every tick at the live price. Immediate economic loss at cash-in = (K − S) × shares.
    *  - open:      open exposure = economic loss if every still-open policy cashed in now, (K − S)+ × 100 (moves up and down);
    *               openCash = cash that would need to go out for those, K × 100 on in-the-money policies.
-   *  - membership: annual fees of every user who has turned insurance on (non-refundable: cash kept, no refund liability).
+   *  - membership: p12 plan mix (DEMO ASSUMPTION 70% Yearly / 30% Monthly) of every user who has turned insurance on.
+   *               Yearly: $99 arrives up front at join. Monthly: $29.99 per sim month (21 trading days = 8,190 sim-min),
+   *               accrued pro rata each sim-minute on the still-active monthly members, who churn at an assumed 8%/month
+   *               (also pro rata). Non-refundable for the current period: cash kept, no refund liability. Never decreases.
    *  - net:       net position = collected + membership − cashOut + inventory market value.
    * Scenario buttons / slider only change the rates going forward. */
   var LOCK = {}; // crowd's locked rate inputs per stock (set at the first snapshot after a new book)
-  function newBook() { LOCK = {}; return { minutes: 0, collected: 0, base: 0, reserve: 0, floorPart: 0, cashOut: 0, cashedPol: 0, open: 0, openCash: 0, openPol: 0, inv: {}, invValue: 0, invCost: 0, invAcq: 0, legs: {}, members: 0, membership: 0, fee: CFG.fee }; }
+  function newBook() { LOCK = {}; return { minutes: 0, collected: 0, base: 0, reserve: 0, floorPart: 0, cashOut: 0, cashedPol: 0, open: 0, openCash: 0, openPol: 0, inv: {}, invValue: 0, invCost: 0, invAcq: 0, legs: {}, members: 0, membership: 0, fee: CFG.fee, memYearly: 0, memMonthly: 0, mYearly: 0, mMonthlyJoined: 0, mMonthlyActive: 0 }; }
   function invAdd(B, t, sh, K, S) {
     if (!(sh > 0)) return;
     var I = B.inv[t] || (B.inv[t] = { sh: 0, cost: 0, acq: 0, px: S });
@@ -172,8 +181,16 @@
   function accrue(B, r, dtMin) {
     if (!r || !(dtMin > 0)) return B;
     var open = 0, openCash = 0, openPol = 0;
-    // every user who turns insurance on buys the annual membership once (non-refundable, kept)
-    B.members = Math.max(B.members || 0, r.orders || 0); B.membership = B.members * CFG.fee;
+    // p12: every user who turns insurance on joins once, on the assumed plan mix (non-refundable for the period, kept)
+    var prevM = B.members || 0; B.members = Math.max(prevM, r.orders || 0);
+    var joined = B.members - prevM, mf = dtMin / CFG.monthMin;
+    if (joined > 0) {
+      B.mYearly += joined * CFG.mixYearly; B.memYearly += joined * CFG.mixYearly * CFG.feeYearly;          // Yearly: up front
+      B.mMonthlyJoined += joined * (1 - CFG.mixYearly); B.mMonthlyActive += joined * (1 - CFG.mixYearly);
+    }
+    B.memMonthly += B.mMonthlyActive * CFG.feeMonthly * mf;                                                // Monthly: pro rata per sim month
+    B.mMonthlyActive *= Math.pow(1 - CFG.churnMonthly, mf);                                                // assumed churn, pro rata
+    B.membership = B.memYearly + B.memMonthly;
     // v4 taper day and floor clock from the book's minutes (1 tick = 1 trading minute; 390 min = 1 trading day)
     var day = Math.floor(B.minutes / CFG.session) + 1, tau1 = B.minutes / RC.MIN_PER_YEAR * RC.var_session, tau2 = (B.minutes + dtMin) / RC.MIN_PER_YEAR * RC.var_session;
     r.legs.forEach(function (l) {

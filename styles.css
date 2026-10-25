@@ -160,3 +160,34 @@ details.how[open] summary::after{content:"▴"}
 .net-spark{display:block;width:100%;height:48px;background:#fff;border:1px solid var(--line);border-radius:8px}
 .net-key{white-space:nowrap}.net-key i{display:inline-block;width:12px;height:0;border-top:2px solid #111;vertical-align:middle;margin:0 3px 0 6px}
 .net-key i.k2{border-top:2px dashed var(--accent)}
+/* p12: membership plans (Monthly $29.99 / Yearly $99) */
+.plan-pick{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0 12px}
+.plan-opt{display:flex;gap:10px;align-items:flex-start;text-align:left;background:#fff;border:1.5px solid var(--line);border-radius:14px;padding:12px;min-height:44px}
+.plan-opt.on{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-tint)}
+.plan-radio{flex:none;width:18px;height:18px;margin-top:2px;border-radius:50%;border:2px solid #8a8a8a;position:relative}
+.plan-opt.on .plan-radio{border-color:var(--accent)}
+.plan-opt.on .plan-radio::after{content:"";position:absolute;inset:3px;border-radius:50%;background:var(--accent)}
+.plan-main{display:flex;flex-direction:column;gap:2px;min-width:0}
+.plan-price{font-size:22px;font-weight:800;font-variant-numeric:tabular-nums}
+.plan-save{color:var(--accent);font-weight:700}
+@media (max-width:360px){.plan-pick{grid-template-columns:1fr}}
+/* p12: trading-day clock (book clock, 9:30–4:00 sim session) */
+.tclock{padding:12px 14px}
+.tclock .tc-top{display:flex;align-items:baseline;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.tclock .tc-time{font-size:26px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:-.3px}
+.tclock .tc-time small{font-size:13px;font-weight:700;color:var(--muted);margin-left:3px}
+.tc-status{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:3px 10px;font-size:12px;font-weight:800;background:var(--panel2);color:var(--text)}
+.tc-status.open{background:var(--accent);color:#fff}
+.tc-status.open::before{content:"";width:7px;height:7px;border-radius:50%;background:#fff}
+.tc-bar{position:relative;height:10px;margin:22px 0 4px;border-radius:6px;background:#e4e4e4;overflow:visible}
+.tc-fill{position:absolute;left:0;top:0;bottom:0;border-radius:6px;background:var(--accent)}
+.tc-now{position:absolute;top:-4px;bottom:-4px;width:3px;margin-left:-1.5px;border-radius:2px;background:#111}
+.tc-tick{position:absolute;top:0;bottom:0;width:1px;background:#ffffffcc}
+.tc-mk{position:absolute;top:50%;width:9px;height:9px;margin:-4.5px 0 0 -4.5px;border-radius:50%;background:#fff;border:2px solid #111;z-index:1}
+.tc-mk.lo{border-color:var(--accent)}
+.tc-hours{position:relative;height:13px;margin-top:12px;font-size:10.5px;font-weight:700;color:var(--muted)}
+.tc-hours span{position:absolute;transform:translateX(-50%)}
+.tc-bar{margin-top:3px!important}
+.tc-axis{display:flex;justify-content:space-between;margin-top:5px;font-size:10.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.tc-leg{margin-top:4px}
+.tc-k{display:inline-block;width:8px;height:8px;border-radius:50%;border:2px solid #111;margin:0 4px -1px 0}.tc-k.lo{border-color:var(--accent)}

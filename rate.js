@@ -56,7 +56,14 @@
     MIN_PER_YEAR: 252 * 390,
     CAP_PER_STOCK: 5000,   // $ insured value (K x shares) per person per stock
     CAP_TOTAL: 25000,      // $ insured value per person across all stocks
-    MEMBERSHIP_FEE: 99,    // $/yr annual membership, paid up front, non-refundable (draft)
+    MEMBERSHIP_FEE: 99,    // $/yr Yearly plan (kept for older callers; = MEMBERSHIP_YEARLY)
+    // p12 membership plans: Monthly $29.99/mo or Yearly $99/yr. Non-refundable for the current billing period,
+    // auto-renew each period unless cancelled; cancelling takes effect at the end of the current period.
+    MEMBERSHIP_MONTHLY: 29.99, // $/month, billed each month
+    MEMBERSHIP_YEARLY: 99,     // $/year, billed up front
+    MEMBER_MIX_YEARLY: 0.70,   // DEMO ASSUMPTION: share of members picking Yearly (rest Monthly)
+    MEMBER_CHURN_MONTHLY: 0.08,// DEMO ASSUMPTION: share of Monthly members cancelling each month
+    MONTH_TRADING_DAYS: 21,    // sim month for the crowd book = 21 trading days x 390 sim-min
     // p9 lock vol
     LOCK_WINDOW_DAYS: 28,  // look-ahead window for the earnings check when a lock has no fixed end (calendar days; 28 = 4 weeks = the 1-month listed put the floor is benchmarked against)
     // p9 firm-wide limits on insured value (K x shares, $). DEMO values, illustrative only.

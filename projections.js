@@ -128,6 +128,21 @@
     };
   }
 
+  /* p12 membership plans: Yearly $99 billed up front, Monthly $29.99 billed at the start of each month.
+   * Plan mix and monthly churn are DEMO ASSUMPTIONS (defaults 70% Yearly / 30% Monthly, 8%/month).
+   * Monthly: all monthly members pay month 1 at join; churn c applies after each month, so first-year months paid per
+   * monthly member = sum_{k=0..11} (1 - c)^k = (1 - (1 - c)^12) / c. Non-refundable for the current period. */
+  function membership(users, mixY, churn) {
+    var feeY = C.MEMBERSHIP_YEARLY || 99, feeM = C.MEMBERSHIP_MONTHLY || 29.99;
+    mixY = Math.min(1, Math.max(0, mixY)); churn = Math.min(0.99, Math.max(0, churn));
+    var nY = users * mixY, nM = users * (1 - mixY);
+    var months = churn > 0 ? (1 - Math.pow(1 - churn, 12)) / churn : 12;
+    var upFront = nY * feeY, monthly = nM * feeM * months;
+    return { feeY: feeY, feeM: feeM, mixY: mixY, churn: churn, nY: nY, nM: nM, months: months, upFront: upFront,
+      monthly: monthly, firstYear: upFront + monthly, day1: upFront + nM * feeM, nM12: nM * Math.pow(1 - churn, 11),
+      monthlyNoChurn: nM * feeM * 12, save: feeM * 12 - feeY, savePct: (feeM * 12 - feeY) / (feeM * 12) };
+  }
+
   function project(I) {
     var ts = I.stock === 'ALL' ? STOCKS.map(function (s) { return s.t; }) : [I.stock];
     // per-person $25k total cap: stocks are filled in display order; firm limits are shared across the stocks projected
@@ -139,16 +154,16 @@
     });
     ['normal', 'surge', 'wait'].forEach(function (k) { tot[k] = rows.reduce(function (a, r) { return a + r.f[k]; }, 0); });
     tot.perShare = tot.insShares ? tot.profit / tot.insShares : 0;
-    tot.fee = +I.fee || C.MEMBERSHIP_FEE;
-    tot.membership = I.users * tot.fee;          // up-front annual membership cash, non-refundable: kept, no refund liability
-    tot.memberDaily = tot.membership / 365;      // straight-line revenue recognition over the 12-month term (accounting view)
+    var M = membership(I.users, I.mixYearly / 100, I.churn / 100);
+    tot.mem = M; tot.fee = M.feeY;
+    tot.membership = M.firstYear;                // first-year membership revenue (Yearly up front + Monthly billed monthly with churn)
+    tot.memberDaily = M.firstYear / 365;         // straight-line view over the first 12 months
     tot.insuredValue = rows.reduce(function (a, r) { return a + r.insuredValue; }, 0);
     return { rows: rows, tot: tot, I: I };
   }
 
   /* ---------------- inputs ---------------- */
-  var DEF = { users: 1000, stock: 'MOON', shares: 100, cushion: 0, hours: 6.5, overnight: false, news: 0, fullDay: 50, surgePct: 50, coverage: 1, day: 1, fee: 99 };
-  var FEE_OPTS = [49, 99, 199];
+  var DEF = { users: 1000, stock: 'MOON', shares: 100, cushion: 0, hours: 6.5, overnight: false, news: 0, fullDay: 50, surgePct: 50, coverage: 1, day: 1, mixYearly: 70, churn: 8 };
   var I;
   try { I = Object.assign({}, DEF, JSON.parse(localStorage.getItem(KEY)) || {}); } catch (e) { I = Object.assign({}, DEF); }
   function save() { try { localStorage.setItem(KEY, JSON.stringify(I)); } catch (e) {} }
@@ -162,7 +177,9 @@
     { k: 'day', label: 'Policy day n (trading days since lock; taper f(n) = √n − √(n−1), min 0.05)', min: 1, max: 252, step: 1 },
     { k: 'news', label: 'News-shock level H', min: 0, max: 1, step: 0.05 },
     { k: 'fullDay', label: 'Users staying a full 24h (10% off base)', min: 0, max: 100, step: 5, unit: '%' },
-    { k: 'surgePct', label: 'Over-capacity users who pay surge (rest wait)', min: 0, max: 100, step: 5, unit: '%' }
+    { k: 'surgePct', label: 'Over-capacity users who pay surge (rest wait)', min: 0, max: 100, step: 5, unit: '%' },
+    { k: 'mixYearly', label: 'Plan mix: members on Yearly (rest Monthly) · demo assumption', min: 0, max: 100, step: 5, unit: '%' },
+    { k: 'churn', label: 'Monthly-plan churn per month · demo assumption', min: 0, max: 30, step: 0.5, unit: '%' }
   ];
   function toSlider(f, v) { return f.log ? Math.round(Math.log10(Math.max(1, v)) / 6 * 1000) : v; }
   function fromSlider(f, s) { return f.log ? Math.round(Math.pow(10, s / 1000 * 6)) : +s; }
@@ -194,9 +211,11 @@
       segHtml('coverage', COVERAGE_OPTS.map(function (c) { return [c, Math.round(c * 100) + '%']; })) +
       '<div class="pj-sub pj-covnote" id="pj-covnote">' + covNote() + '</div></div>' +
       '<div class="pj-field"><div class="pj-flabel"><span>Include overnight coverage</span></div>' + segHtml('overnight', [[false, 'No'], [true, 'Yes']]) + '</div>' +
-      FIELDS.slice(4).map(fieldHtml).join('') +
-      '<div class="pj-field" id="pj-fee"><div class="pj-flabel"><span>Annual membership fee (paid up front, non-refundable)</span></div>' + segHtml('fee', FEE_OPTS.map(function (x) { return [x, '$' + x + '/yr']; })) +
-      '<div class="pj-sub">Each user pays the membership once a year on top of premiums. It is non-refundable, so the whole fee is cash kept on day 1 with no refund liability.</div></div>' +
+      FIELDS.slice(4, 8).map(fieldHtml).join('') +
+      '<div class="pj-field" id="pj-fee"><div class="pj-flabel"><span>Membership plans (non-refundable for the current billing period)</span></div>' +
+      '<div class="pj-seg pj-plans" role="group"><span class="pj-plan"><b>Monthly</b> $' + (C.MEMBERSHIP_MONTHLY || 29.99).toFixed(2) + '/mo</span><span class="pj-plan"><b>Yearly</b> $' + (C.MEMBERSHIP_YEARLY || 99) + '/yr</span></div>' +
+      '<div class="pj-sub">Every user is a member on top of premiums. Yearly is paid up front; Monthly is billed each month and auto-renews until cancelled. Yearly saves $' + ((C.MEMBERSHIP_MONTHLY || 29.99) * 12 - (C.MEMBERSHIP_YEARLY || 99)).toFixed(2) + ' (≈' + Math.round(((C.MEMBERSHIP_MONTHLY || 29.99) * 12 - (C.MEMBERSHIP_YEARLY || 99)) / ((C.MEMBERSHIP_MONTHLY || 29.99) * 12) * 100) + '%) vs 12 × $' + (C.MEMBERSHIP_MONTHLY || 29.99).toFixed(2) + ' = $' + ((C.MEMBERSHIP_MONTHLY || 29.99) * 12).toFixed(2) + '.</div></div>' +
+      FIELDS.slice(8).map(fieldHtml).join('') +
       '<div class="pj-sub pj-capnote">Coverage cap: at most $' + C.CAP_PER_STOCK.toLocaleString() + ' insured value per stock and $' + C.CAP_TOTAL.toLocaleString() + ' in total (K × shares), per verified person (identity/KYC), not per brokerage account.</div>' +
       '<div class="pj-sub pj-exercise">Optional exercise: the cushion (K) is only the line where users <b>may</b> cash in. Nothing is sold automatically, and users can keep insurance on indefinitely.</div>' +
       '<button class="pj-btn ghost" data-pact="reset">Reset inputs</button></div>' +
@@ -225,6 +244,19 @@
   function kpi(k, v, sub, c) { return '<div class="pj-kpi"><div class="k">' + k + '</div><div class="v ' + (c || '') + '">' + v + '</div>' + (sub ? '<div class="pj-sub">' + sub + '</div>' : '') + '</div>'; }
   function line(k, v, c) { return '<div class="pj-line' + (c ? ' ' + c : '') + '"><span>' + k + '</span><b>' + v + '</b></div>'; }
 
+  function memberCard(M) {
+    function m2(x) { return money(x, 2); }
+    function ref(n) { var R = membership(n, M.mixY, M.churn); return '<div class="pj-tr" data-ref="' + n + '"><span><b>' + num(n) + '</b></span><span>' + money(R.upFront) + '</span><span>' + money(R.monthly) + '</span><span>' + money(R.firstYear) + '</span></div>'; }
+    return '<div class="pj-card" id="pj-member"><h3 class="pj-h">Membership plans · first year <span class="pj-mini">Projection — demo assumptions</span></h3>' +
+      line('Yearly: ' + num(M.nY) + ' members × $' + M.feeY + ' (up front)', money(M.upFront), 'em') +
+      line('Monthly: ' + num(M.nM) + ' members × $' + M.feeM.toFixed(2) + ' × ' + M.months.toFixed(3) + ' paid months', money(M.monthly)) +
+      '<div class="pj-sub">Paid months per Monthly member = Σ(1 − ' + (M.churn * 100) + '%)^k, k = 0…11 = (1 − ' + (1 - M.churn).toFixed(3) + '^12) / ' + M.churn.toFixed(3) + ' = ' + M.months.toFixed(3) + ' (12 with no churn: ' + money(M.monthlyNoChurn) + '). ' + num(M.nM12) + ' Monthly members still paying in month 12.</div>' +
+      line('= first-year membership revenue', money(M.firstYear), 'em') +
+      line('Cash on day 1 (Yearly + first Monthly charge)', money(M.upFront) + ' + ' + money(M.nM * M.feeM) + ' = ' + money(M.day1)) +
+      '<div class="pj-table" style="margin-top:8px"><div class="pj-tr pj-th"><span>Users</span><span>Up front</span><span>Monthly yr 1</span><span>First year</span></div>' + ref(1000) + ref(10000) + '</div>' +
+      '<div class="pj-sub">Plan mix ' + Math.round(M.mixY * 100) + '% Yearly / ' + Math.round((1 - M.mixY) * 100) + '% Monthly and ' + (M.churn * 100) + '%/month Monthly churn are demo assumptions. Fees are non-refundable for the current billing period (no refund liability). Yearly renewals and Yearly churn fall after the first year and are not counted. Not included in the premium or profit KPIs above.</div></div>';
+  }
+
   function outHtml() {
     var pr = project(I), T = pr.tot, rows = pr.rows, multi = rows.length > 1;
     var h = '<div class="pj-card"><h3 class="pj-h">Capacity &amp; waiting line <span class="pj-mini">Projection — demo inputs</span></h3>' + rows.map(capBar).join('') + '</div>';
@@ -237,9 +269,11 @@
       kpi('Expected profit / share', signed(T.perShare, 4), 'per insured share, day + night', cls(T.perShare)) +
       kpi('Reserve (surge uplift)', money(T.reserve), 'target ' + money(T.reserveTarget) + ' (20% drop on surge shares)') +
       kpi('1-in-20 bad gap loss', I.overnight ? '−' + money(T.tail) : '—', I.overnight ? '95th-pct overnight gap, all insured shares' : 'turn overnight on') +
-      kpi('Membership cash (up front)', money(T.membership), num(I.users) + ' × $' + T.fee + ' · annual, non-refundable: kept, no refund liability · recognized ≈ ' + money(T.memberDaily) + '/day over 12 months') +
+      kpi('Membership · first year', money(T.mem.firstYear), 'Yearly ' + money(T.mem.upFront) + ' + Monthly ' + money(T.mem.monthly) + ' (' + I.mixYearly + '/' + (100 - I.mixYearly) + ' mix, ' + I.churn + '%/mo churn, assumed) · ≈ ' + money(T.memberDaily) + '/day') +
+      kpi('Membership cash up front', money(T.mem.upFront), num(T.mem.nY) + ' Yearly × $' + T.mem.feeY + ' · day 1 incl. first Monthly charge ' + money(T.mem.day1)) +
       kpi('Covered shares / user', rows.map(function (r) { return num(r.n) + (r.n < r.nReq ? ' of ' + num(r.nReq) : ''); }).join(' · '), rows.some(function (r) { return r.n < r.nReq; }) ? 'capped: $' + C.CAP_PER_STOCK.toLocaleString() + ' per stock / $' + C.CAP_TOTAL.toLocaleString() + ' per person (K × shares)' : 'within the per-person cap ($' + C.CAP_PER_STOCK.toLocaleString() + ' per stock, $' + C.CAP_TOTAL.toLocaleString() + ' total)') +
       '</div><div class="pj-row pj-sub" style="margin-top:8px"><span>Users: ' + num(T.normal) + ' normal · ' + num(T.surge) + ' surge · ' + num(T.wait) + ' waiting</span></div></div>';
+    h += memberCard(T.mem);
     if (multi) {
       h += '<div class="pj-card"><h3 class="pj-h">Per stock <span class="pj-mini">Projection — demo inputs</span></h3><div class="pj-table"><div class="pj-tr pj-th"><span>Stock</span><span>Covered sh</span><span>Prem/day</span><span>Loss</span><span>Profit</span></div>' +
         rows.map(function (r) { return '<div class="pj-tr"><span><b>' + r.t + '</b></span><span>' + num(r.n) + (r.n < r.nReq ? '/' + num(r.nReq) : '') + '</span><span>' + money(r.dayPrem + r.nightPrem) + '</span><span>' + money(r.dayLoss + r.nightLoss) + '</span><span class="' + cls(r.profit) + '">' + signed(r.profit) + '</span></div>'; }).join('') +
@@ -282,7 +316,7 @@
       '<li>Floor: each day\'s charge is at least 1.15 × N × [P(n·w) − P((n−1)·w)], the Black-Scholes put (σ_annual, r = 0) for the covered variance w = 0.75 × (covered session min / 390) + 0.25 × (night covered), in trading days. This is a minimum, not a target: the price never drops below the comparable put (cumulative charge ≥ 1.15 × the put). $6/min cap on the base before surge; $0.002/min operational minimum.</li>' +
       '<li>Full-day pricing: the session and the overnight gap are each priced on a full trading day of variance (as in v3). σ₁ = σ_annual × √(1 / (252·390)); the night lump is the stand-alone gap expected shortfall on a full day\'s variance. The put floor and expected losses use the physical split (session 75%, overnight 25% of a day\'s variance), so the floor matches the comparable listed put.</li>' +
       '<li>Per-person caps: covered shares = floor(min($5,000, $25,000 − insured value in other stocks) / K), per verified person (identity/KYC) — not per account. "All four" fills stocks in order for the $25k total.</li>' +
-      '<li>Membership: every user pays the annual fee up front ($49 / $99 / $199). Non-refundable, so it is counted as cash kept with no refund liability; for accounting it is recognized evenly over the 12-month term (fee/365 per day). It is not included in premium or profit KPIs above.</li>' +
+      '<li>Membership (p12): Monthly $' + (C.MEMBERSHIP_MONTHLY || 29.99).toFixed(2) + '/month or Yearly $' + (C.MEMBERSHIP_YEARLY || 99) + '/year, each non-refundable for the current billing period and auto-renewing until cancelled (cancellation takes effect at the end of the current period). Plan mix (default 70% Yearly) and Monthly churn (default 8%/month) are demo assumptions. Yearly fees are cash up front; Monthly fees are billed at the start of each month. Not included in premium or profit KPIs above.</li>' +
       '<li>All users arrive at once, FIFO, identical orders. Open band (u &lt; 0.90 of the stock\'s limit): fill if it fits; near cap: fill only if it fits and ≤ 0.5% of the limit; otherwise the chosen % pay surge (M = max(2.0, M(book stress))) and the rest wait. No surge fill may push u above 1.25.</li>' +
       '<li>"All four": every user insures the chosen shares in each stock; each stock has its own limit, and the sector and firm limits are shared. Totals add stocks; the bad-gap total assumes all four gap down together.</li>' +
       '<li>Expected loss: the increase in expected shortfall N·S·σ√τ·G(z) over day n\'s covered variance for a lock held since day 1 (σ_gap = σ_annual·√(0.25/252) overnight). News is assumed to raise realized vol by (1+H) for losses; the premium uses (1+3H), locked at start.</li>' +

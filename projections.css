@@ -64,3 +64,8 @@
 /* p8: long v4 breakdown values wrap instead of squeezing the label */
 .pj-line span{flex:1 1 45%;min-width:0}
 .pj-line b{flex:0 1 auto;max-width:58%;white-space:normal;overflow-wrap:anywhere}
+/* p12 membership plans */
+.pj-plans{grid-template-columns:1fr 1fr}
+.pj-plan{display:flex;align-items:center;justify-content:center;gap:6px;min-height:46px;border-radius:9px;background:#fff;color:var(--text);font-size:13.5px;font-weight:700}
+.pj-plan b{color:var(--accent)}
+#pj-member .pj-tr{grid-template-columns:1fr 1.2fr 1.3fr 1.3fr}

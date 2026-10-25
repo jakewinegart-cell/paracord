@@ -129,25 +129,52 @@
     });
   }
 
-  /* ---------------- membership (annual, paid up front, non-refundable) ---------------- */
-  function isMember() { return !!(state.member && state.member.until > simNow()); }
+  /* ---------------- membership (p12: Monthly $29.99 or Yearly $99; non-refundable for the current period) ---------------- */
+  var PLANS = {
+    monthly: { id: 'monthly', name: 'Monthly', fee: RC.MEMBERSHIP_MONTHLY || 29.99, per: 'month', every: 'each month', days: 30 },
+    yearly: { id: 'yearly', name: 'Yearly', fee: RC.MEMBERSHIP_YEARLY || RC.MEMBERSHIP_FEE || 99, per: 'year', every: 'each year', days: 365 }
+  };
+  function planOf(m) { return PLANS[(m && m.plan) || 'yearly'] || PLANS.yearly; }
+  function feeTxt(x) { return '$' + (Math.round(x) === x ? String(x) : x.toFixed(2)); }
+  var YR_SAVE = PLANS.monthly.fee * 12 - PLANS.yearly.fee, YR_SAVE_PCT = YR_SAVE / (PLANS.monthly.fee * 12); // $260.88, ≈72%
+  // auto-renew: roll the paid period forward while renewal is on (demo, nothing charged); cancelled = ends at period end
+  function memberRoll() {
+    var m = state.member; if (!m) return;
+    var P = planOf(m), now = simNow();
+    if (!m.plan) { m.plan = 'yearly'; m.fee = P.fee; }
+    while (m.autoRenew && m.until <= now) { m.periodStart = m.until; m.until += P.days * DAY; m.renewals = (m.renewals || 0) + 1; }
+  }
+  function isMember() { memberRoll(); return !!(state.member && state.member.until > simNow()); }
   function dateStr(ms) { return new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); }
   function memberBadge() {
     if (!isMember()) return '';
-    var m = state.member;
-    return '<div class="member-badge"><span class="pill gold">★ Member</span> <span class="small"><b>Annual membership, non-refundable</b> · $' + m.fee + '/yr · ' + (m.autoRenew ? 'renews ' : 'ends ') + dateStr(m.until) + '</span></div>';
+    var m = state.member, P = planOf(m);
+    return '<div class="member-badge" data-plan="' + P.id + '"><span class="pill gold">★ ' + P.name + ' member</span> <span class="small"><b>' + feeTxt(P.fee) + '/' + P.per + '</b> · non-refundable for the current ' + P.per + ' · ' + (m.autoRenew ? 'renews ' : 'renewal cancelled · ends ') + dateStr(m.until) + '</span></div>';
+  }
+  var memberPick = 'yearly'; // sheet selection; default Yearly
+  function planCard(P) {
+    var on = memberPick === P.id;
+    return '<button type="button" class="plan-opt' + (on ? ' on' : '') + '" data-act="member-plan" data-plan="' + P.id + '" role="radio" aria-checked="' + on + '">' +
+      '<span class="plan-radio"></span><span class="plan-main"><b>' + P.name + '</b><span class="plan-price">' + feeTxt(P.fee) + '<span class="small muted"> / ' + P.per + '</span></span>' +
+      '<span class="small muted">' + (P.id === 'yearly' ? 'Billed ' + feeTxt(P.fee) + ' up front · <span class="plan-save">save ' + feeTxt(+YR_SAVE.toFixed(2)) + ' (≈' + Math.round(YR_SAVE_PCT * 100) + '%) vs 12 × ' + feeTxt(PLANS.monthly.fee) + ' = ' + feeTxt(+(PLANS.monthly.fee * 12).toFixed(2)) + '</span>' : 'Billed ' + feeTxt(P.fee) + ' each month · ' + feeTxt(+(P.fee * 12).toFixed(2)) + ' over 12 months') + '</span></span></button>';
+  }
+  function memberSheetBody() {
+    var P = PLANS[memberPick], until = simNow() + P.days * DAY;
+    return '<div class="plan-pick" role="radiogroup" aria-label="Membership plan">' + planCard(PLANS.monthly) + planCard(PLANS.yearly) + '</div>' +
+      '<div class="card" id="memberTerms" data-plan="' + P.id + '"><div style="font-weight:800;margin:0 0 8px">' + P.name + ' membership · ' + feeTxt(P.fee) + '/' + P.per + '</div>' +
+      '<ul class="small member-terms">' +
+      '<li><b>Price:</b> ' + feeTxt(P.fee) + ' charged today for the first ' + P.per + ' (to ' + dateStr(until) + '), on top of the per-minute insurance premiums. Membership lets you turn on Paracord insurance; premiums are billed separately.</li>' +
+      '<li><b>Non-refundable for the current billing period.</b> No full or partial refund of the current ' + P.per + ' if you cancel early, stop using insurance, or close your account, except where the law requires one.</li>' +
+      '<li><b>' + P.name + ' auto-renews ' + P.every + '</b> at ' + feeTxt(P.fee) + ' (next on ' + dateStr(until) + ') unless you cancel. We email a reminder before each renewal.</li>' +
+      '<li><b>Cancel anytime</b> in one step (Demo menu → Membership → Cancel renewal). Cancelling takes effect at the end of the current ' + P.per + '; you keep access until then.</li>' +
+      '<li><b>Coverage limits:</b> $' + RC.CAP_PER_STOCK.toLocaleString() + ' insured value per stock and $' + RC.CAP_TOTAL.toLocaleString() + ' in total (lock-in price × shares), per verified person (identity check), not per brokerage account.</li></ul>' +
+      '<label class="row small member-agree" style="gap:8px;align-items:flex-start;margin-top:8px"><input type="checkbox" id="memberAgree"> <span>I agree to the ' + P.name + ' plan: ' + feeTxt(P.fee) + ' charged today, <b>non-refundable for the current ' + P.per + '</b>, auto-renewing ' + P.every + ' at ' + feeTxt(P.fee) + ' until I cancel (cancellation takes effect at the end of the current ' + P.per + ').</span></label></div>' +
+      '<button class="btn" id="memberJoin" data-act="member-join" data-plan="' + P.id + '" data-t="' + (route.t || '') + '" disabled>Join ' + P.name + ' for ' + feeTxt(P.fee) + '/' + P.per + ' (demo)</button>';
   }
   function memberSheet() {
-    var fee = RC.MEMBERSHIP_FEE, until = simNow() + 365 * DAY;
     return '<h2>Paracord membership</h2><div class="demo-tag">DEMO — nothing is charged</div>' +
-      '<div class="card"><div class="big">$' + fee + '<span class="small muted"> / year</span></div><div style="font-weight:800;margin:4px 0 8px">Annual membership, non-refundable</div>' +
-      '<ul class="small member-terms">' +
-      '<li><b>Charged up front today</b> for 12 months (to ' + dateStr(until) + '), on top of the per-minute insurance premiums. Membership lets you turn on Paracord insurance; premiums are billed separately.</li>' +
-      '<li><b>Non-refundable.</b> No full or partial refund if you cancel early, stop using insurance, or close your account, except where the law requires one.</li>' +
-      '<li><b>Renews automatically</b> every year at $' + fee + ' on ' + dateStr(until) + ' unless you cancel before then. We email a reminder before each renewal. Cancel online in one step (Demo menu → Membership); you keep access until the end of the paid year.</li>' +
-      '<li><b>Coverage limits:</b> $' + RC.CAP_PER_STOCK.toLocaleString() + ' insured value per stock and $' + RC.CAP_TOTAL.toLocaleString() + ' in total (lock-in price × shares), per verified person (identity check), not per brokerage account.</li></ul>' +
-      '<label class="row small member-agree" style="gap:8px;align-items:flex-start;margin-top:8px"><input type="checkbox" id="memberAgree"> <span>I understand the $' + fee + ' annual membership is charged today, is <b>non-refundable</b>, and renews each year until I cancel.</span></label></div>' +
-      '<button class="btn" id="memberJoin" data-act="member-join" data-t="' + (route.t || '') + '" disabled>Join for $' + fee + '/year (demo)</button><button class="btn ghost" data-act="close-sheet">Not now</button>';
+      '<p class="small muted" style="margin:8px 0">Choose a plan. Both are non-refundable for the current billing period and renew automatically until you cancel.</p>' +
+      '<div id="memberSheetBody">' + memberSheetBody() + '</div><button class="btn ghost" data-act="close-sheet">Not now</button>';
   }
 
   /* ---------------- formatting ---------------- */
@@ -218,7 +245,7 @@
 
   function viewHome() {
     var held = heldTickers();
-    return '<div class="card hero"><div class="small" style="opacity:.8">Total holdings (simulated)</div><div class="big" data-live="total"></div>' +
+    return clockCard() + '<div class="card hero"><div class="small" style="opacity:.8">Total holdings (simulated)</div><div class="big" data-live="total"></div>' +
       '<div class="row between small" style="margin-top:8px"><span>Protected: <b data-live="protected"></b></span><span>Insurance: <b data-live="totalrate"></b></span></div>' +
       (state.cash > 0 ? '<div class="row between small" style="margin-top:6px"><span>Cash from shares sold to Paracord</span><b>' + money(state.cash, 2) + '</b></div>' : '') + memberBadge() + '</div>' +
       confCard() + invCard() +
@@ -238,7 +265,7 @@
     if (!ins) {
       return '<div class="card">' + head + '<div class="ratebox"><div class="small muted">If enabled now (rate locks at the current price, volatility and news)</div>' +
         '<div class="rate" style="font-size:26px" data-live="previewrate:' + t + '"></div><div class="small muted" data-live="previewsub:' + t + '"></div></div>' +
-        (isMember() ? memberBadge() : '<div class="small member-req"><b>Requires Paracord membership:</b> $' + RC.MEMBERSHIP_FEE + '/year, charged up front. <b>Annual membership, non-refundable.</b> Full terms shown before you join.</div>') +
+        (isMember() ? memberBadge() : '<div class="small member-req"><b>Requires Paracord membership:</b> Monthly ' + feeTxt(PLANS.monthly.fee) + '/month or Yearly ' + feeTxt(PLANS.yearly.fee) + '/year. Non-refundable for the current billing period; auto-renews until cancelled. Full terms shown before you join.</div>') +
         '<div class="small muted">Turning this on sets your lock-in to the current simulated price and locks your rate. You can cash out insured shares to Paracord at the lock-in price any time (demo).</div></div>';
     }
     return '<div class="card">' + head +
@@ -316,8 +343,8 @@
       '<div class="seg" style="margin:10px 0">' + [1, 60, 600].map(function (x) { return '<button class="' + (sp === x ? 'on' : '') + '" data-act="speed" data-x="' + x + '">×' + x + '</button>'; }).join('') + '</div>' +
       '<div class="grid2"><button class="btn ghost" data-act="skip" data-ms="3600000">⏩ Skip 1 hour</button><button class="btn ghost" data-act="skip" data-ms="' + DAY + '">⏩ Skip 24 hours</button></div>' +
       '<div class="small muted" style="margin-top:8px">Fast-forward accrues insurance cost at the current rate and advances the 24h discount progress.</div></div>' +
-      '<div class="card"><h3>Membership</h3>' + (isMember() ? memberBadge() + '<div class="small muted" style="margin:6px 0">Auto-renewal is ' + (state.member.autoRenew ? 'on' : 'off') + '. Cancelling stops the next renewal; the current year is non-refundable and stays active until ' + dateStr(state.member.until) + '.</div>' +
-        '<button class="btn sm ghost" data-act="member-autorenew">' + (state.member.autoRenew ? 'Cancel auto-renewal (one step)' : 'Turn auto-renewal back on') + '</button>' : '<div class="small muted">Not a member. Annual membership, non-refundable: $' + RC.MEMBERSHIP_FEE + '/year, shown with full terms when you first turn on insurance.</div>') + '</div>' +
+      '<div class="card" id="member-settings"><h3>Membership</h3>' + (isMember() ? memberBadge() + '<div class="small muted" style="margin:6px 0" id="member-renew-note">' + planOf(state.member).name + ' plan · renewal is ' + (state.member.autoRenew ? 'on: renews ' + planOf(state.member).every + ' at ' + feeTxt(planOf(state.member).fee) : 'cancelled') + '. Cancelling takes effect at the end of the current ' + planOf(state.member).per + '; the current ' + planOf(state.member).per + ' is non-refundable and stays active until ' + dateStr(state.member.until) + '.</div>' +
+        '<button class="btn sm ghost" id="memberCancel" data-act="member-autorenew">' + (state.member.autoRenew ? 'Cancel renewal' : 'Resume renewal') + '</button> <span class="small muted">(demo only)</span>' : '<div class="small muted">Not a member. Monthly ' + feeTxt(PLANS.monthly.fee) + '/month or Yearly ' + feeTxt(PLANS.yearly.fee) + '/year, non-refundable for the current billing period; shown with full terms when you first turn on insurance.</div>') + '</div>' +
       '<div class="card"><h3>Reset</h3><button class="btn danger" data-act="reset">Reset demo</button><div class="small muted" style="margin-top:8px">Clears insured flags, lock-ins, timestamps, membership, linked accounts and receipts from this browser.</div></div>';
   }
   function viewDemo() {
@@ -453,7 +480,7 @@
 
   /* ---------------- p10: intraday net range (peak / low over the simulated trading day) ----------------
    * Net today = premiums collected today − cash paid for cash-ins today + market value now of the shares taken in today.
-   * That is the resilience card's Net position without membership fees: membership is a one-off, up-front annual fee that jumps
+   * That is the resilience card's Net position without membership fees: membership (p12: Yearly up front + Monthly pro rata) jumps
    * by millions whenever a scenario brings new users in, so it would hide the intraday shape. Second line: net today − open
    * exposure (what would be left if every still-open policy cashed in now) - the line a crash pushes down.
    * The book's trading day is 390 sim-minutes (1 tick = 1 trading minute; confidence.js B.day = floor(minutes / 390) + 1), so the
@@ -480,6 +507,38 @@
     netLast = netSnap(B);
   }
   function tradeClock(m) { var t = 9 * 60 + 30 + Math.round(m), h = Math.floor(t / 60), mm = t % 60; return (h > 12 ? h - 12 : h) + ':' + String(mm).padStart(2, '0') + (h >= 12 ? ' pm' : ' am'); }
+  /* ---------------- p12: trading-day clock (the book's clock, same as Net today) ----------------
+   * Book minutes since page load / reset; 1 tick = 1 trading minute; 390 sim-min per day (9:30 am–4:00 pm), then the next
+   * tick opens the next sim day at 9:31 (the crowd book has no overnight, so there is no After-hours state).
+   * minutes = 0: Pre-market (book not started) · 0 < m < 390: Open · m = 390: Closed (4:00 pm bell; rolls to day + 1 next tick). */
+  function tcParts(minutes) {
+    var day = Math.floor(Math.max(0, minutes - 1e-9) / NET_SESSION) + 1, m = Math.max(0, minutes - (day - 1) * NET_SESSION);
+    var st = minutes <= 0 ? 'Pre-market' : m >= NET_SESSION - 1e-9 ? 'Closed' : 'Open';
+    var t = 9 * 60 + 30 + Math.floor(m + 1e-9), h = Math.floor(t / 60), mm = t % 60;
+    return { day: day, m: m, pct: Math.min(1, m / NET_SESSION), status: st, time: (h > 12 ? h - 12 : h) + ':' + String(mm).padStart(2, '0'), ap: h >= 12 ? 'PM' : 'AM' };
+  }
+  function clockHtml() {
+    var B = confBook, P = tcParts(B ? B.minutes : 0);
+    function at(mm) { return (mm / NET_SESSION * 100).toFixed(2) + '%'; }
+    var ticks = [30, 150, 270].map(function (mm) { return '<i class="tc-tick" style="left:' + at(mm) + '"></i>'; }).join('');
+    var mk = '', leg = '';
+    if (netDay && netDay.day === P.day && netDay.hist.length && P.status !== 'Pre-market') {
+      mk = '<i class="tc-mk hi" data-tc="peak" style="left:' + at(netDay.net.hiM) + '" title="Net today peak ' + tradeClock(netDay.net.hiM) + '"></i>' +
+        '<i class="tc-mk lo" data-tc="low" style="left:' + at(netDay.net.loM) + '" title="Net today low ' + tradeClock(netDay.net.loM) + '"></i>';
+      leg = '<div class="small muted tc-leg"><i class="tc-k hi"></i>Net today peak ' + tradeClock(netDay.net.hiM) + ' · <i class="tc-k lo"></i>low ' + tradeClock(netDay.net.loM) + '</div>';
+    }
+    return '<div class="tc-top"><div><div class="small muted">Trading day clock · sim day <b id="tc-day">' + P.day + '</b></div>' +
+      '<div class="tc-time" id="tc-time" data-m="' + P.m.toFixed(2) + '">' + P.time + '<small>' + P.ap + '</small></div></div>' +
+      '<div style="text-align:right"><span class="tc-status ' + P.status.toLowerCase().replace(/[^a-z]/g, '') + '" id="tc-status">' + P.status + '</span>' +
+      '<div class="small muted" style="margin-top:4px"><b id="tc-pct">' + Math.round(P.pct * 100) + '%</b> of session · ' + Math.round(NET_SESSION - P.m) + ' min left</div></div></div>' +
+      '<div class="tc-hours"><span style="left:' + at(30) + '">10</span><span style="left:' + at(150) + '">12</span><span style="left:' + at(270) + '">2</span></div>' +
+      '<div class="tc-bar" role="progressbar" aria-label="Trading session elapsed" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + Math.round(P.pct * 100) + '">' +
+      '<div class="tc-fill" style="width:' + (P.pct * 100).toFixed(2) + '%"></div>' + ticks + mk + '<i class="tc-now" style="left:' + (P.pct * 100).toFixed(2) + '%"></i></div>' +
+      '<div class="tc-axis"><span>9:30 AM open</span><span>4:00 PM close</span></div>' + leg;
+  }
+  function clockCard() { return '<div class="card tclock" id="tclock" aria-live="off">' + clockHtml() + '</div>'; }
+  function clockLive() { var el = document.getElementById('tclock'); if (el) el.innerHTML = clockHtml(); }
+
   function netRangeHtml(sg) {
     var N = netDay;
     if (!N || !N.hist.length) return '<div class="net-range" id="net-range"><div class="small"><b>Net today</b> <span class="muted">· collecting…</span></div></div>';
@@ -529,7 +588,7 @@
       'Fear = 0.40·insured share + 0.20·cash-in rate + 0.15·waiting-line/surge share + 0.15·drop + 0.10·news H − 0.25·rally; Index = 100 / (1 + e<sup>8·(fear − 0.15)</sup>). ' +
       'Resilience is a running book for this session: every sim-minute, premiums accrue = open policies × their v4 rate, locked when they turned insurance on (users who join later lock at the conditions then), × the duration taper, never below 1.15 × the put-value floor (plus surge uplift, which goes to the reserve), within firm-wide limits on insured value: per name min(10% of the $' + (RC.FIRM_LIMIT / 1e6) + 'M firm limit, 10% of its daily $ volume), 25% per sector, and the firm total (demo values). Half of over-capacity users surge, the rest wait; the surge multiplier follows book-wide stress (firm/sector use + index drop), so a crash raises prices on all names together. ' +
       'Rates lock at max(recent realized, options-implied) volatility. Scenarios move the simulated market factor: every name moves by its fitted market loading, so a crash hits all stocks together (some more than others). ' +
-      'Every user who turns insurance on pays the $' + RC.MEMBERSHIP_FEE + ' annual membership up front; it is non-refundable, so it is counted as cash kept with no refund liability (for accounting it is earned over 12 months). ' +
+      'Every user who turns insurance on becomes a member. Plan mix is a <b>demo assumption</b>: ' + Math.round(window.PCConfidence.CFG.mixYearly * 100) + '% Yearly (' + feeTxt(window.PCConfidence.CFG.feeYearly) + ', arrives up front at join) / ' + Math.round((1 - window.PCConfidence.CFG.mixYearly) * 100) + '% Monthly (' + feeTxt(window.PCConfidence.CFG.feeMonthly) + ' per sim month of 21 trading days, accrued pro rata each sim-minute), with an <b>assumed</b> ' + Math.round(window.PCConfidence.CFG.churnMonthly * 100) + '%/month churn of Monthly members (pro rata). Fees are non-refundable for the current period, so they are counted as cash kept with no refund liability. Membership is shown separately from premiums. ' +
       'Cash-ins are optional and physically settled: below the cushion some users cash in each minute; Paracord pays them K × shares and takes the shares into its inventory (see the next card). Open exposure = the loss if every open policy cashed in now, (K − S) per share. Premiums in, cash out and inventory shares only grow; the index, inventory value and open exposure move freely. Not a forecast.</div></details></div>';
   }
   function confBody(r) {
@@ -557,10 +616,10 @@
       '<div class="stat"><div class="k">Cash in · premiums</div><div class="v" id="conf-prem">' + m(B.collected) + '</div><div class="small muted">collected so far · incl. ' + m(B.reserve) + ' surge reserve</div></div>' +
       '<div class="stat"><div class="k">Cash out · cash-in purchases</div><div class="v" id="conf-paid">' + m(B.cashOut) + '</div><div class="small muted">paid K × shares · ' + polTxt(B.cashedPol) + ' policies · ' + tksN + ' name' + (tksN === 1 ? '' : 's') + '</div></div>' +
       '<div class="stat"><div class="k">Stock inventory</div><div class="v" id="conf-inv">' + m(B.invValue) + '</div><div class="small muted">market value now · cost ' + m(B.invCost) + '</div></div>' +
-      '<div class="stat"><div class="k">Membership fees · non-refundable</div><div class="v" id="conf-memb">' + m(B.membership || 0) + '</div><div class="small muted">' + Math.round(B.members || 0).toLocaleString() + ' members × $' + (B.fee || RC.MEMBERSHIP_FEE) + ' annual, paid up front · kept, no refund liability</div></div>' +
+      '<div class="stat"><div class="k">Membership fees · non-refundable</div><div class="v" id="conf-memb">' + m(B.membership || 0) + '</div><div class="small muted" id="conf-memb-sub">Yearly ' + m(B.memYearly || 0) + ' up front (' + Math.round(B.mYearly || 0).toLocaleString() + ' × ' + feeTxt(PLANS.yearly.fee) + ') · Monthly ' + m(B.memMonthly || 0) + ' accrued (' + Math.round(B.mMonthlyActive || 0).toLocaleString() + ' active × ' + feeTxt(PLANS.monthly.fee) + '/mo, pro rata) · assumed mix ' + Math.round(window.PCConfidence.CFG.mixYearly * 100) + '/' + Math.round((1 - window.PCConfidence.CFG.mixYearly) * 100) + ', churn ' + Math.round(window.PCConfidence.CFG.churnMonthly * 100) + '%/mo</div></div>' +
       '<div class="stat"><div class="k">Open exposure</div><div class="v" id="conf-open">' + m(B.open) + '</div><div class="small muted">loss if all ' + Math.round(B.openPol).toLocaleString() + ' open policies cashed in now (cash needed ' + m(B.openCash) + ')</div></div>' +
       '</div><div class="row between" style="margin-top:8px"><b>Net position</b><b class="' + (B.net >= 0 ? 'up' : 'down') + '" id="conf-net">' + sg(B.net) + '</b></div>' + netRangeHtml(sg) +
-      '<div class="small muted" style="margin-top:4px">Net position = premiums + membership fees − cash paid + inventory at market · net today = premiums − cash paid + market value of shares taken in, all for today (membership fees left out: they are one-off), with its peak and low over the simulated trading day (390 sim-min, 9:30–4:00; resets each new sim day and on page load); after open exposure = net today − open exposure · rates locked at start (v4) · status: net position vs open exposure (surge reserve ' + m(B.reserve) + ', target ' + m(T.target) + ') · firm limit use ' + Math.round((T.firmUtil || 0) * 100) + '%, worst sector ' + Math.round((T.sectorUtilMax || 0) * 100) + '%, book stress ' + (T.stress || 0).toFixed(2) + (T.M > 1 ? ' → surge ×' + T.M.toFixed(2) + ' on new locks' : '') + ', ' + Math.round(T.wait).toLocaleString() + ' waiting · resets on page load · scenarios change rates going forward, not past collections · nothing auto-sells</div></div>';
+      '<div class="small muted" style="margin-top:4px">Net position = premiums + membership fees − cash paid + inventory at market · net today = premiums − cash paid + market value of shares taken in, all for today (membership fees left out: shown separately, Yearly up front + Monthly pro rata), with its peak and low over the simulated trading day (390 sim-min, 9:30–4:00; resets each new sim day and on page load); after open exposure = net today − open exposure · rates locked at start (v4) · status: net position vs open exposure (surge reserve ' + m(B.reserve) + ', target ' + m(T.target) + ') · firm limit use ' + Math.round((T.firmUtil || 0) * 100) + '%, worst sector ' + Math.round((T.sectorUtilMax || 0) * 100) + '%, book stress ' + (T.stress || 0).toFixed(2) + (T.M > 1 ? ' → surge ×' + T.M.toFixed(2) + ' on new locks' : '') + ', ' + Math.round(T.wait).toLocaleString() + ' waiting · resets on page load · scenarios change rates going forward, not past collections · nothing auto-sells</div></div>';
     return '<div class="conf-top"><div><div class="big conf-num">' + v.toFixed(0) + '</div>' +
       '<div class="small"><b>' + r.band + '</b> · <span class="' + (d >= 0 ? 'up' : 'down') + '">' + (d >= 0 ? '+' : '−') + Math.abs(d).toFixed(1) + ' vs open</span></div></div>' + spark + '</div>' + gauge +
       '<div class="small muted conf-drv">Insured ' + Math.round(r.pIns * 100) + '% of users · cash-ins ' + pctTxt(r.cashRate) + ' (' + belowN + ' name' + (belowN === 1 ? '' : 's') + ' below K) · waiting/surge ' + Math.round(r.lineRate * 100) + '% · market ' + (r.mkt >= 0 ? '+' : '−') + Math.abs(r.mkt).toFixed(1) + 'σ · news H ' + r.H.toFixed(2) + '</div>' + movesHtml(r) + res;
@@ -669,6 +728,7 @@
     if (cs && route.view === 'cashout' && state.ins[route.t]) cs.innerHTML = coRows(route.t, Math.min(route.n || state.ins[route.t].shares, state.ins[route.t].shares));
     drawChart();
     confLive();
+    clockLive();
   }
 
   function drawChart() {
@@ -725,18 +785,23 @@
         accrue(); save(); render.noScroll = true; render(); toast(BY_B[el.dataset.b].name + ' unlinked (demo)'); break;
       case 'toggle-ins':
         if (state.ins[t]) disableIns(t);
-        else if (!isMember()) { openSheet('member', { t: t }); break; }
+        else if (!isMember()) { memberPick = 'yearly'; openSheet('member', { t: t }); break; }
         else if (enableIns(t)) toast('⛨ Insured ' + state.ins[t].shares + ' sh at ' + money(sim.price(t), 2) + ' · rate locked (demo)');
         render.noScroll = true; render(); break;
       case 'member-join':
         var ag = document.getElementById('memberAgree'); if (!ag || !ag.checked) break;
-        state.member = { joinedAt: simNow(), until: simNow() + 365 * DAY, fee: RC.MEMBERSHIP_FEE, autoRenew: true, nonRefundable: true };
+        var jp = PLANS[el.dataset.plan] || PLANS.yearly;
+        state.member = { plan: jp.id, joinedAt: simNow(), periodStart: simNow(), until: simNow() + jp.days * DAY, fee: jp.fee, autoRenew: true, nonRefundable: true, renewals: 0 };
         save(); var mt = el.dataset.t;
         if (mt && BY_T[mt] && !state.ins[mt]) enableIns(mt);
         history.go(-(route.sheetDepth || 1));
-        toast('★ Member · $' + RC.MEMBERSHIP_FEE + '/yr annual membership, non-refundable (demo, nothing charged)' + (mt && state.ins[mt] ? ' · ' + mt + ' insured' : '')); break;
+        toast('★ ' + jp.name + ' member · ' + feeTxt(jp.fee) + '/' + jp.per + ', non-refundable for the current ' + jp.per + ' (demo, nothing charged)' + (mt && state.ins[mt] ? ' · ' + mt + ' insured' : '')); break;
+      case 'member-plan':
+        memberPick = PLANS[el.dataset.plan] ? el.dataset.plan : 'yearly';
+        var msb = document.getElementById('memberSheetBody'); if (msb) msb.innerHTML = memberSheetBody(); // consent resets to unticked on plan change
+        break;
       case 'member-autorenew':
-        if (state.member) { state.member.autoRenew = !state.member.autoRenew; save(); render.noScroll = true; render(); toast(state.member.autoRenew ? 'Auto-renewal on' : 'Auto-renewal cancelled · membership stays active until ' + dateStr(state.member.until) + ' (no refund)'); } break;
+        if (state.member) { state.member.autoRenew = !state.member.autoRenew; save(); render.noScroll = true; render(); toast(state.member.autoRenew ? 'Renewal resumed · ' + planOf(state.member).name + ' renews ' + dateStr(state.member.until) : 'Renewal cancelled · ' + planOf(state.member).name + ' membership stays active until ' + dateStr(state.member.until) + ' (no refund for the current ' + planOf(state.member).per + ')'); } break;
       case 'news':
         if (newsScore(t) > 0.01) state.news[t] = []; else { state.news[t] = [{ at: simNow(), sev: 1, rel: 1 }]; toast('⚡ Demo news shock on ' + t + ' — H = 1, decays over ~20 sim-min'); }
         save(); live(); break;
