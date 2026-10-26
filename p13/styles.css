@@ -255,3 +255,5 @@ details.how[open] summary::after{content:"▴"}
 :root[data-theme=dark] .theme-btn .sun{display:none}:root[data-theme=dark] .theme-btn .moon{display:block}
 .theme-btn:focus-visible,.demo-chip:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
 .theme-btn+.demo-chip{margin-left:0}
+.logo-dark{display:none}
+:root[data-theme=dark] .logo-light{display:none}:root[data-theme=dark] .logo-dark{display:block}
