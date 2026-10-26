@@ -77,3 +77,11 @@ html[data-theme="dark"] .bx-stale{color:#f0c060}
 .bouncer-demotag[hidden]{display:none}
 .bouncer-demobar{margin:0 16px 8px;padding:7px 10px;border-radius:10px;background:#c98a001f;border:1px solid #c98a00;color:var(--text,#111);font:600 12px/1.35 system-ui,sans-serif}
 .bouncer-demobar[hidden]{display:none}
+/* p13f4 Possible actions: every item styled the same (no accent, no first-item emphasis, no colour by option) */
+.bx-opts{margin-top:8px;padding-top:6px;border-top:1px dashed var(--line,#ddd);font-size:12px}
+.bx-opts-h{font-weight:600;color:var(--muted,#666)}
+.bx-opts-note{margin:2px 0 4px;font-size:11px;color:var(--muted,#666)}
+.bx-opts-list{list-style:none;margin:0;padding:0}
+.bx-opt{border-bottom:1px dashed var(--line,#eee)}
+.bx-opt summary{cursor:pointer;padding:4px 0;font-weight:400;color:inherit}
+.bx-opt p{margin:0 0 5px 14px;color:var(--muted,#666)}

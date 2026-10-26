@@ -34,10 +34,28 @@
   function triggerText(lv) { return 'Trigger: ' + fmtPct(lv.th) + ' gap (clears under ' + fmtPct(lv.clr) + ')'; }
   function tipDue(count, seen) { return count > 0 && !seen; }
   function tipText(lv, demo) {
-    return 'This is a risk alert only. The red pulse means that, in one or more stocks, at least one of the top 10% of holders has had a gap of ' + fmtPct(lv.th) + ' or more between their protected price (K) and the stock price for ' + B.BOUNCER_SUSTAIN_MIN + ' minutes of market session. Tap the button to see the stocks, how far each has dropped, how many holders are affected and their combined gap. It does not suggest any action.' +
+    return 'This is a risk alert only. The red pulse means that, in one or more stocks, at least one of the top 10% of holders has had a gap of ' + fmtPct(lv.th) + ' or more between their protected price (K) and the stock price for ' + B.BOUNCER_SUSTAIN_MIN + ' minutes of market session. Tap the button to see the stocks, how far each has dropped, how many holders are affected and their combined gap. Each flagged stock also lists all possible actions, in the same fixed order for every stock and unranked: this is not a recommendation, and nothing places an order.' +
       (demo ? ' Demo sensitivity is on, so the trigger is lowered from ' + fmtPct(B.BOUNCER_GAP_THRESHOLD) + ' to ' + fmtPct(lv.th) + '.' : '');
   }
-  var api = { fmtPct: fmtPct, triggerText: triggerText, tipDue: tipDue, tipText: tipText, holderId: holderId, topHolders: topHolders, levels: levels, create: create, step: step, sortRows: sortRows, seedDemoK: seedDemoK, K_AS_OF: K_AS_OF, core: CORE };
+  /* p13f4 "Possible actions": the FULL set of options a firm could take on its own risk, from Paracord's perspective, shown on every flagged card.
+   * Neutral by construction: one fixed order for every stock and state (never sorted or filtered by the stock's situation), equal styling, no default,
+   * no ranking, no sizes or amounts, nothing executes (tapping an item only expands its one-line description). Static: built once, no stock data. */
+  var POSSIBLE_ACTIONS = Object.freeze([
+    Object.freeze({ id: 'hold', label: 'Hold / take no action', what: 'Keeps current positions and coverage as they are.', tradeoff: 'Exposure to this stock stays where it is.' }),
+    Object.freeze({ id: 'monitor', label: 'Monitor more closely (set a price alert)', what: 'Watches this stock more often through a price alert.', tradeoff: 'Adds attention; exposure stays where it is.' }),
+    Object.freeze({ id: 'buy', label: 'Buy shares', what: 'Adds shares of this stock to the firm\'s own book.', tradeoff: 'Raises the firm\'s exposure to further moves.' }),
+    Object.freeze({ id: 'sell', label: 'Sell or reduce existing inventory', what: 'Lowers the firm\'s existing holding in this stock.', tradeoff: 'Cuts exposure; may realize a gain or a loss.' }),
+    Object.freeze({ id: 'hedge', label: 'Hedge with listed puts', what: 'Buys exchange-listed put options on this stock.', tradeoff: 'Offsets part of a further drop; costs a premium.' }),
+    Object.freeze({ id: 'pause', label: 'Pause new coverage on this stock', what: 'Stops writing new coverage on this stock for a time.', tradeoff: 'Limits new exposure and new premium income.' }),
+    Object.freeze({ id: 'review', label: 'Review with counsel or risk', what: 'Refers this stock to legal or risk review.', tradeoff: 'Adds an outside view; takes time to complete.' })
+  ]);
+  var OPTS_DISCLAIMER = 'All possible actions, listed in the same order for every stock. Not a recommendation. Nothing here places an order.';
+  function optsHtml() {
+    return '<section class="bx-opts" aria-label="Possible actions"><div class="bx-opts-h">Possible actions</div><p class="bx-opts-note">' + OPTS_DISCLAIMER + '</p><ul class="bx-opts-list">' +
+      POSSIBLE_ACTIONS.map(function (o) { return '<li class="bx-opt"><details><summary>' + o.label + '</summary><p>' + o.what + ' Tradeoff: ' + o.tradeoff + '</p></details></li>'; }).join('') + '</ul></section>';
+  }
+  var OPTS_HTML = optsHtml();
+  var api = { fmtPct: fmtPct, triggerText: triggerText, tipDue: tipDue, tipText: tipText, holderId: holderId, topHolders: topHolders, levels: levels, create: create, step: step, sortRows: sortRows, seedDemoK: seedDemoK, K_AS_OF: K_AS_OF, core: CORE, POSSIBLE_ACTIONS: POSSIBLE_ACTIONS, OPTS_DISCLAIMER: OPTS_DISCLAIMER, optsHtml: optsHtml };
   g.PCBouncer = api;
   if (typeof module !== 'undefined') module.exports = api;
   if (typeof document === 'undefined') return;
@@ -168,7 +186,7 @@
       '<div class="bx-stale-line" data-f="stale">' + f.stale + '</div>' +
       '<div class="bx-line"><span data-f="k">' + f.k + '</span><span class="bx-drop" data-f="drop">' + f.drop + '</span></div>' +
       '<div class="bx-line bx-gap"><span data-f="n">' + f.n + '</span><span data-f="worst">' + f.worst + '</span><span data-f="min">' + f.min + '</span></div>' +
-      '<details class="bx-holders"><summary data-f="sum">' + f.sum + '</summary><div class="bx-hlist"></div></details></article>';
+      '<details class="bx-holders"><summary data-f="sum">' + f.sum + '</summary><div class="bx-hlist"></div></details>' + OPTS_HTML + '</article>';
   }
   function patchCard(el, c) {
     var f = fields(c);
