@@ -72,3 +72,8 @@ html[data-theme="dark"] .bx-stale{color:#f0c060}
 .bx-notes{margin:2px 0 8px}
 .bx-note{font-size:12px;color:var(--muted,#666);border:1px dashed var(--line,#ddd);border-radius:10px;padding:7px 10px;margin:0 0 6px}
 .bx-h small{color:var(--muted,#666);font-weight:400}
+/* bouncerfix2 (p13f2): unmistakable label while the session-only demo sensitivity (2% trigger) is on */
+.bouncer-demotag{position:absolute;left:50%;bottom:-9px;transform:translateX(-50%);z-index:3;white-space:nowrap;padding:0 5px;height:16px;border-radius:999px;background:#c98a00;color:#fff;font:800 9px/16px system-ui,sans-serif;letter-spacing:.02em;border:2px solid var(--bg,#fff)}
+.bouncer-demotag[hidden]{display:none}
+.bouncer-demobar{margin:0 16px 8px;padding:7px 10px;border-radius:10px;background:#c98a001f;border:1px solid #c98a00;color:var(--text,#111);font:600 12px/1.35 system-ui,sans-serif}
+.bouncer-demobar[hidden]{display:none}

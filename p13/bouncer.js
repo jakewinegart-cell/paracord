@@ -57,23 +57,26 @@
   // simulated in this preview; the real-price run of this same engine is the offline replay)
   var FEED = typeof location !== 'undefined' && /[?&]feed=real(&|$)/.test(location.search) ? 'real' : 'sim';
   if (FEED === 'real') Object.keys(g.PC_UNIVERSE_BY_T || {}).forEach(function (t) { if (g.PC_UNIVERSE_BY_T[t].fictional) feedDrop[t] = 1; });
-  var demo = load('bouncerDemoSens', false) === true, tipSeen = load('bouncerTipSeen', false) === true, tipOn = false, tipShows = 0, open = false, lastMkt = null;
+  // bouncerfix2 (p13f2): demo sensitivity is SESSION-ONLY - always off on load, never saved. Earlier builds saved it under
+  // 'p13:bouncerDemoSens', so a returning visitor silently kept the 2% demo trigger; that old key is removed here.
+  try { localStorage.removeItem(PREFIX + 'bouncerDemoSens'); } catch (e) {}
+  var demo = false, tipSeen = load('bouncerTipSeen', false) === true, tipOn = false, tipShows = 0, open = false, lastMkt = null;
   function money(x, d) { return (x < 0 ? '−' : '') + '$' + Math.abs(x).toLocaleString('en-US', { minimumFractionDigits: d || 0, maximumFractionDigits: d || 0 }); }
   function pct(x) { return (x * 100).toFixed(1) + '%'; }
   function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
 
   var btn = document.createElement('button');
   btn.id = 'bouncer'; btn.className = 'bouncer'; btn.type = 'button'; btn.setAttribute('aria-label', 'Bouncer: no stocks flagged'); btn.setAttribute('aria-haspopup', 'dialog');
-  btn.innerHTML = '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.5 21.5c1-1 2.3-1.7 3.5-2.5 2-1.3 3.3-2.4 3.3-3.6s-1-2.2-2.1-2.8"/><path d="M10.8 11.4C7.6 9.8 6.2 7.8 6.8 5.6 7.4 3.6 9.6 2.5 12 2.5s4.6 1.1 5.2 3.1c.6 2.2-1.7 4.6-5.2 6.4-2 1-3.3 2.2-3.3 3.4s1 2.2 2.1 2.9"/><path d="M13.2 19.8c1 .6 1.8 1.2 2.3 1.7"/></svg><span class="bouncer-badge" hidden></span>';
+  btn.innerHTML = '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.5 21.5c1-1 2.3-1.7 3.5-2.5 2-1.3 3.3-2.4 3.3-3.6s-1-2.2-2.1-2.8"/><path d="M10.8 11.4C7.6 9.8 6.2 7.8 6.8 5.6 7.4 3.6 9.6 2.5 12 2.5s4.6 1.1 5.2 3.1c.6 2.2-1.7 4.6-5.2 6.4-2 1-3.3 2.2-3.3 3.4s1 2.2 2.1 2.9"/><path d="M13.2 19.8c1 .6 1.8 1.2 2.3 1.7"/></svg><span class="bouncer-demotag" hidden>DEMO</span><span class="bouncer-badge" hidden></span>';
   document.body.appendChild(btn);
   var scrim = document.createElement('div'); scrim.className = 'bouncer-scrim'; scrim.hidden = true;
   scrim.innerHTML = '<section class="bouncer-panel" role="dialog" aria-modal="true" aria-labelledby="bouncerTitle"><div class="bouncer-grab"></div>' +
     '<header class="bouncer-head"><div><h2 id="bouncerTitle">Bouncer</h2><div class="bouncer-sub" id="bouncerSub"></div><div class="bouncer-session" id="bouncerSession" data-state=""></div></div><button class="bouncer-close" type="button" aria-label="Close" data-bx="close">✕</button></header>' +
-    '<div class="bouncer-trigger" id="bouncerTrigger"></div><label class="bouncer-sens"><input type="checkbox" id="bouncerDemoSens"> Demo sensitivity <span id="bouncerSensTxt"></span></label>' +
+    '<div class="bouncer-trigger" id="bouncerTrigger"></div><div class="bouncer-demobar" id="bouncerDemoBar" hidden></div><label class="bouncer-sens"><input type="checkbox" id="bouncerDemoSens"> Demo sensitivity <span id="bouncerSensTxt"></span></label>' +
     '<div class="bouncer-list" id="bouncerList"></div>' +
     '<p class="bouncer-note">Demo only. Risk information only: not a recommendation to buy, sell or take any other action.</p></section>';
   document.body.appendChild(scrim);
-  var listEl = scrim.querySelector('#bouncerList'), subEl = scrim.querySelector('#bouncerSub'), sensEl = scrim.querySelector('#bouncerDemoSens'), sensTxt = scrim.querySelector('#bouncerSensTxt'), trigEl = scrim.querySelector('#bouncerTrigger'), sessEl = scrim.querySelector('#bouncerSession');
+  var listEl = scrim.querySelector('#bouncerList'), subEl = scrim.querySelector('#bouncerSub'), sensEl = scrim.querySelector('#bouncerDemoSens'), sensTxt = scrim.querySelector('#bouncerSensTxt'), trigEl = scrim.querySelector('#bouncerTrigger'), demoBar = scrim.querySelector('#bouncerDemoBar'), sessEl = scrim.querySelector('#bouncerSession');
   var tipEl = document.createElement('div'); tipEl.className = 'bouncer-tip'; tipEl.id = 'bouncerTip'; tipEl.hidden = true; tipEl.setAttribute('role', 'dialog'); tipEl.setAttribute('aria-labelledby', 'bouncerTipTitle');
   tipEl.innerHTML = '<b id="bouncerTipTitle">Why am I seeing this?</b><p id="bouncerTipText"></p><button type="button" class="bouncer-tip-ok" data-bx="tipok">Got it</button>';
   document.body.appendChild(tipEl);
@@ -137,7 +140,8 @@
     if (b.dataset.bx === 'close') return toggle(false);
   });
   document.addEventListener('keydown', function (e) { if (open && e.key === 'Escape') toggle(false); });
-  sensEl.addEventListener('change', function () { demo = sensEl.checked; store('bouncerDemoSens', demo); E.st = {}; E.stk = {}; E.flagged = []; E.count = 0; E.holderCount = 0; if (lastMkt) step(E, lastMkt, E.minute, levels(demo), lastClk); paint(); if (open) renderList(true); });
+  function setDemo(on) { demo = !!on; sensEl.checked = demo; E.st = {}; E.stk = {}; E.flagged = []; E.count = 0; E.holderCount = 0; if (lastMkt) step(E, lastMkt, E.minute, levels(demo), lastClk); paint(); if (open) renderList(true); }
+  sensEl.addEventListener('change', function () { setDemo(sensEl.checked); }); // session-only: not stored
 
   /* one card per flagged stock; [data-f] fields are patched in place every tick (no re-render, no new warning) */
   function kTxt(c) { return c.Kmin === c.Kmax ? 'K ' + money(c.Kmax, 2) : 'K ' + money(c.Kmin, 2) + ' to ' + money(c.Kmax, 2); }
@@ -175,6 +179,8 @@
   function renderList(force) {
     var lv = levels(demo);
     trigEl.textContent = triggerText(lv) + (demo ? ' · demo sensitivity' : '');
+    demoBar.hidden = !demo;
+    if (demo) { var dt = 'DEMO ' + fmtPct(lv.th) + ' trigger: demo sensitivity is on, so far more stocks are flagged than at the real ' + fmtPct(B.BOUNCER_GAP_THRESHOLD) + ' trigger. It turns off when you reload.'; if (demoBar.textContent !== dt) demoBar.textContent = dt; }
     subEl.textContent = E.count ? E.count + ' stock' + (E.count === 1 ? '' : 's') + ' flagged · ' + E.holderCount + ' of ' + E.holders.length + ' top-10% holders · gap ≥ ' + fmtPct(lv.th) + ' for ' + B.BOUNCER_SUSTAIN_MIN + ' session-min · sorted by combined gap $'
       : 'Watching the top 10% of holders (' + E.holders.length + ') by insured value. Nothing concerning.';
     var dl = levels(true); sensTxt.textContent = '(' + fmtPct(dl.th) + ' / ' + fmtPct(dl.clr) + ' instead of ' + fmtPct(B.BOUNCER_GAP_THRESHOLD) + ' / ' + fmtPct(B.BOUNCER_CLEAR) + '; for demos)';
@@ -183,7 +189,8 @@
     var empty = listEl.querySelector('.bx-empty');
     if (!E.flagged.length) {
       listEl.querySelectorAll('.bx-stock').forEach(function (el) { el.remove(); });
-      if (!empty) listEl.innerHTML = '<div class="bx-empty">No stock has a holder past the trigger right now.' + (demo ? ' Try Demo → Crash.' : ' A Demo → Crash rarely opens a ' + fmtPct(lv.th) + ' gap; turn on Demo sensitivity to see it fire.') + '</div>';
+      var et = 'No stock has a holder past the trigger right now.' + (demo ? ' Try Demo → Crash.' : ' A Demo → Crash rarely opens a ' + fmtPct(lv.th) + ' gap; turn on Demo sensitivity to see it fire.');
+      if (!empty) listEl.innerHTML = '<div class="bx-empty">' + et + '</div>'; else if (empty.textContent !== et) empty.textContent = et; // p13f2: follows the demo switch
       setNotes(np); return;
     }
     if (empty) empty.remove();
@@ -230,7 +237,8 @@
     if (tipDue(n, tipSeen)) showTip();
     btn.classList.toggle('alert', n > 0);
     badge.hidden = !n; badge.textContent = n > 99 ? '99+' : String(n);
-    btn.setAttribute('aria-label', n ? 'Bouncer: ' + n + ' stock' + (n === 1 ? '' : 's') + ' flagged, open details' : 'Bouncer: no stocks flagged');
+    var tag = btn.querySelector('.bouncer-demotag'), dtag = 'DEMO ' + fmtPct(levels(true).th); tag.hidden = !demo; if (tag.textContent !== dtag) tag.textContent = dtag; btn.classList.toggle('demo', demo);
+    btn.setAttribute('aria-label', (n ? 'Bouncer: ' + n + ' stock' + (n === 1 ? '' : 's') + ' flagged, open details' : 'Bouncer: no stocks flagged') + (demo ? ' (demo ' + fmtPct(levels(true).th) + ' trigger on)' : ''));
     if (open) renderList(false);
   }
   /** called by app.js once per sim tick with the crowd snapshot (confidence.js compute), the running book and the market clock
@@ -249,5 +257,6 @@
   api.kmap = function () { return KMAP; };
   api.reset = function () { E = create(E.holders); paint(); };
   api.reseedK = function () { KMAP = seedDemoK(TOP, g.PC_UNIVERSE_BY_T || {}); store(K_STORE, { v: 1, salt: K_SALT, asOf: K_AS_OF, seededAt: 'deterministic (holder, ticker); not time-based', k: KMAP }); CORE.applyK(TOP, KMAP, MK.nextTradingDay); E = create(TOP); paint(); };
+  api.setDemo = function (on) { setDemo(on); }; // session-only switch (tests / demos); never persisted
   api.state = function () { return { count: E.count, holderCount: E.holderCount, cardsMade: cardsMade, flagged: E.flagged, minute: E.minute, session: E.key, feed: FEED, marketOpen: E.open, noPrice: E.noPrice, stale: E.stale, clk: lastClk, demo: demo, levels: levels(demo), tipShown: tipOn, tipSeen: tipSeen, tipShows: tipShows, holders: E.holders.length, open: open }; };
 })(typeof window !== 'undefined' ? window : globalThis);

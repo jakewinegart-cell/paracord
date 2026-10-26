@@ -36,6 +36,9 @@
   if (!state.pc) state.pc = { date: null, px: {} };
 
   if (!state.conf) state.conf = { target: 0, mood: 0, open: null };
+  // p13f3: the Demo-tab scenario (Crash / Panic day / ... ) is SESSION-ONLY. Every load starts on Normal: a scenario saved by this or
+  // an older build (inside the saved demo state) is cleared here; the rest of the state (holdings, insured stocks, ...) is kept.
+  state.conf.target = 0; state.conf.mood = 0;
   // monotonic premium counters: gross charged per policy and in total (rebates credited separately, cash-outs don't reduce them)
   Object.keys(state.ins).forEach(function (t) { var i = state.ins[t]; if (i.gross == null) i.gross = i.cost + (i.rebates || 0); });
   if (state.paid == null) state.paid = Object.keys(state.ins).reduce(function (a, t) { return a + state.ins[t].gross; }, 0);
