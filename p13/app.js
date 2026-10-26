@@ -906,7 +906,7 @@
       case 'skip': accrue(); state.clock.offset += +el.dataset.ms; accrue(); save(); live(); toast('⏩ Skipped ' + (+el.dataset.ms === DAY ? '24 hours' : '1 hour') + ' (demo clock)'); break;
       case 'speed': state.clock.speed = +el.dataset.x; save(); render.noScroll = true; render(); break;
       case 'reset':
-        if (el.dataset.armed) { localStorage.removeItem(KEY); state = freshState(); state.conf = { target: 0, mood: 0, open: null }; confHist = []; confLast = null; confBook = window.PCConfidence ? window.PCConfidence.newBook() : null; netDay = null; netLast = null; state.paid = 0; state.rebated = 0; state.cash = 0; invHist = []; pfHist = {}; pfOrder = null; nudge = window.PCNudge ? window.PCNudge.create() : null; nudgeMin = 0; sim = newSim({}); window.__paracord.sim = sim; STOCKS.forEach(function (s) { state.open[s.t] = sim.price(s.t); }); save(); replace({ view: 'home' }); toast('Demo reset'); }
+        if (el.dataset.armed) { localStorage.removeItem(KEY); state = freshState(); state.conf = { target: 0, mood: 0, open: null }; confHist = []; confLast = null; confBook = window.PCConfidence ? window.PCConfidence.newBook() : null; netDay = null; netLast = null; state.paid = 0; state.rebated = 0; state.cash = 0; invHist = []; pfHist = {}; pfOrder = null; nudge = window.PCNudge ? window.PCNudge.create() : null; nudgeMin = 0; if (window.PCBouncer && window.PCBouncer.reset) window.PCBouncer.reset(); sim = newSim({}); window.__paracord.sim = sim; STOCKS.forEach(function (s) { state.open[s.t] = sim.price(s.t); }); save(); replace({ view: 'home' }); toast('Demo reset'); }
         else { el.dataset.armed = '1'; el.textContent = 'Tap again to reset everything'; }
         break;
       case 'cashout': go({ view: 'cashout', t: t, step: 'summary', n: state.ins[t].shares, flow: Date.now().toString(36) }); break;
@@ -961,6 +961,7 @@
     confNoise = 0.92 * confNoise + 0.12 * (Math.random() + Math.random() + Math.random() - 1.5) * 2;
     var cr = confCompute(); if (cr) { confHist.push(cr.index); if (confHist.length > 240) confHist.shift(); if (confBook) { window.PCConfidence.accrue(confBook, cr, 1); netTrack(confBook); invHist.push(confBook.invValue); if (invHist.length > 240) invHist.shift(); } } // 1 tick = 1 sim trading minute
     nudgeStep();
+    if (window.PCBouncer && window.PCBouncer.tick) window.PCBouncer.tick(cr, confBook); // bouncer1: ops alert, once per sim minute
     accrue(); save(); live();
   }
   /* nudge1: one nudge evaluation per sim trading minute over every held position (not only rows on screen) */

@@ -50,25 +50,26 @@
     function pickDemo(ex) { var tot = 0; dk.forEach(function (t) { if (t !== ex) tot += CFG.demoPick[t]; }); var u = R() * tot; for (var i = 0; i < dk.length; i++) { if (dk[i] === ex) continue; u -= CFG.demoPick[dk[i]]; if (u <= 0) return dk[i]; } return dk[dk.length - 1]; }
     function gauss() { var u = 0, v = 0; while (!u) u = R(); while (!v) v = R(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
     var wUser = CFG.users / CFG.samples, BYT = {}; DEFS.forEach(function (d) { BYT[d.t] = d; });
-    var namesPer = 0, insuredPer = 0;
+    var namesPer = 0, insuredPer = 0, list = []; // bouncer1: also keep each sampled portfolio (no extra random draws, aggregates unchanged)
     for (var s = 0; s < CFG.samples; s++) {
       var names = [pickDemo(null)]; if (R() < CFG.secondDemo) names.push(pickDemo(names[0]));
       var k = CFG.spNames[0] + Math.floor(R() * (CFG.spNames[1] - CFG.spNames[0] + 1));
       for (var j = 0; j < k; j++) { var d = pickSp(); if (names.indexOf(d.t) < 0) names.push(d.t); }
       // random order for the $25k total cap
       for (var q = names.length - 1; q > 0; q--) { var r = Math.floor(R() * (q + 1)), tmp = names[q]; names[q] = names[r]; names[r] = tmp; }
-      var other = 0;
+      var other = 0, mine = { i: s, legs: [], insured: 0 };
       names.forEach(function (t) {
         var dd = BYT[t]; if (!dd) return;
         var px = dd.p0, sh = Math.max(1, Math.round(CFG.posMedian * Math.exp(CFG.posSigma * gauss()) / px)), K = px * (1 - CFG.cushion);
         var c = g.paracordCapShares(K, sh, other); other += c * K;
         if (c <= 0) return;
         var a = by[t] || (by[t] = { holders: 0, shares: 0 }); a.holders += wUser; a.shares += wUser * c;
-        namesPer += 1; insuredPer += c * K;
+        namesPer += 1; insuredPer += c * K; mine.legs.push({ t: t, sh: c, Kf: 1 - CFG.cushion }); mine.insured += c * K;
       });
+      if (mine.legs.length) list.push(mine);
     }
     Object.keys(by).forEach(function (t) { by[t].sh = by[t].shares / by[t].holders; });
-    return { by: by, names: Object.keys(by), avgNames: namesPer / CFG.samples, avgInsured: insuredPer / CFG.samples };
+    return { by: by, names: Object.keys(by), avgNames: namesPer / CFG.samples, avgInsured: insuredPer / CFG.samples, holders: list, usersPerSample: wUser };
   })();
   var BY_T = {}; DEFS.forEach(function (d) { BY_T[d.t] = d; });
 
