@@ -40,6 +40,11 @@
     BOUNCER_DEMO_GAP_THRESHOLD: 0.02, // ONLY with the panel's "Demo sensitivity" checkbox (off by default; default = the 15%/10% above). Picked so Crash strobes inside ~30 s: gap first reaches 2% ~5-13 sim-min after Crash, + the 15-min sustain
     BOUNCER_DEMO_CLEAR: 0.013          // ~ the same 2:3 clear/threshold ratio as 0.10 / 0.15
   };
+  function sticky(all, prev, cap) {
+    var was = {}; (prev || []).forEach(function (n) { was[n.t] = 1; });
+    var keep = all.filter(function (n) { return was[n.t]; }), fresh = all.filter(function (n) { return !was[n.t]; });
+    return keep.slice(0, cap).concat(fresh.slice(0, Math.max(0, cap - keep.length))).sort(function (a, b) { return b.pct - a.pct; });
+  }
   /* small shared sustain helpers (same rule the nudges apply inline: a condition "held N minutes" once minute - since >= N) */
   function since(prev, cond, minute) { return cond ? (prev == null ? minute : prev) : null; }
   function held(s, minute, n) { return s != null && minute - s >= n; }
@@ -96,7 +101,9 @@
     for (var x in E.tk) if (!seen[x]) { E.tk[x].red = E.tk[x].green = false; } // sold / unlinked
     red.sort(function (a, b) { return b.pct - a.pct; }); green.sort(function (a, b) { return b.pct - a.pct; });
     E.redAll = red; E.greenAll = green;
-    E.red = red.slice(0, N.NUDGE_MAX_ACTIVE); E.green = green.slice(0, N.NUDGE_UP_MAX_ACTIVE); // others wait
+    // bouncer2: sticky slots - a stock already nudging keeps its slot (its % text just updates) until its own condition clears;
+    // only free slots go to the largest waiting moves. Re-ranking never bumps a live nudge out and back in (no restarted animation / "new" nudge).
+    E.red = sticky(red, E.red, N.NUDGE_MAX_ACTIVE); E.green = sticky(green, E.green, N.NUDGE_UP_MAX_ACTIVE); // others wait
     E.shown = {}; E.red.forEach(function (n) { n.kind = 'red'; E.shown[n.t] = n; }); E.green.forEach(function (n) { n.kind = 'green'; E.shown[n.t] = n; });
     return E;
   }

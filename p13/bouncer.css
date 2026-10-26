@@ -53,3 +53,15 @@
 .bouncer-tip b{display:block;font-size:14px;margin-bottom:4px}
 .bouncer-tip p{margin:0 0 10px}
 .bouncer-tip-ok{display:block;margin-left:auto;font:600 13px system-ui,sans-serif;padding:7px 14px;border-radius:10px;border:0;background:#111;color:#fff;cursor:pointer}
+/* bouncer2: one card per flagged stock, numbers patched in place */
+.bx-stock .bx-top{justify-content:flex-start}
+.bx-tk{font-size:15px}
+.bx-now{font-size:13px;color:var(--muted,#666);font-variant-numeric:tabular-nums}
+.bx-stock .bx-tot{margin-left:auto}
+.bx-drop b{color:#b3261e}
+.bx-stock .bx-line{padding:2px 0}
+.bx-holders{margin-top:4px;font-size:12px}
+.bx-holders summary{cursor:pointer;color:var(--muted,#666);font-weight:600;padding:3px 0}
+.bx-hlist{max-height:220px;overflow:auto;border-top:1px dashed var(--line,#ddd)}
+.bx-h{display:flex;flex-wrap:wrap;gap:2px 10px;padding:4px 0;border-bottom:1px dashed var(--line,#eee);font-variant-numeric:tabular-nums}
+.bx-h span:first-child{font-weight:700;min-width:96px}
