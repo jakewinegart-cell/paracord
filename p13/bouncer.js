@@ -1,73 +1,43 @@
-/* Paracord — the Bouncer (DEMO ops alert). Watches the top 10% of individual crowd holders by insured value and flags any
- * holder-stock whose price sits far below the holder's insured level K: gap = (K - price) / K. A holder-stock is concerning once
- * the gap has held >= threshold for 15 sim-minutes; it clears under the clear level (hysteresis). The panel shows ONE warning
- * card per stock (bouncer2): the card is created when the first holder in that stock crosses, its numbers update in place every
- * tick (more holders crossing or the price falling further never adds a new warning), and it is removed when no holder in the
- * stock is still past the clear level. Badge = flagged stocks. Recommended actions are display-only: "Simulate" logs to the
- * console and shows a toast; nothing changes. Constants: PCNudge.BOUNCER (nudge.js). */
+/* Paracord — the Bouncer (DEMO ops alert): panel + app adapter. The engine (per-holder K, session-minute sustain, clear
+ * hysteresis, stale feed handling) lives in bouncer-core.js and the market calendar in market.js; both are DOM-free and shared
+ * with the tests, the real-price replay and a future Cloudflare Worker. The panel shows ONE warning card per stock (bouncer2),
+ * updated in place, removed when no holder in the stock is still past the clear level. Badge = flagged stocks.
+ * ALERT-ONLY (securities-law review): the panel shows neutral risk information - the stock, its live drop, how many top holders
+ * are affected, the combined gap $ (exposure), the K range, session status and stale state. It recommends no action and computes
+ * no trade or position. Constants: PCBouncerCore.BOUNCER. */
 (function (g) {
   'use strict';
-  var NU = g.PCNudge || (typeof require !== 'undefined' ? require('./nudge.js') : null);
-  var B = NU.BOUNCER, PREFIX = 'p13:';
-
-  /* ---------------- engine (pure; node-testable) ---------------- */
-  /** stable anonymized id per sampled holder: a fixed permutation of 1000-9999 (7919 is prime, coprime with 9000) */
-  function holderId(i) { return 1000 + ((i * 7919 + 1237) % 9000); }
-  /** top pct of holders by insured value (ties broken by sample index so the pick is stable) */
-  function topHolders(list, pct) {
-    var n = Math.ceil(list.length * (pct == null ? B.BOUNCER_TOP_PCT : pct));
-    return list.slice().sort(function (a, b) { return b.insured - a.insured || a.i - b.i; }).slice(0, n);
-  }
-  /** counter position for one holder: COUNTER_PCT of the gap $, capped per holder */
-  function counterSize(gapUsd) { return Math.min(B.BOUNCER_PER_HOLDER_CAP, B.BOUNCER_COUNTER_PCT * Math.max(0, gapUsd)); }
-  function levels(demo) { return demo ? { th: B.BOUNCER_DEMO_GAP_THRESHOLD, clr: B.BOUNCER_DEMO_CLEAR } : { th: B.BOUNCER_GAP_THRESHOLD, clr: B.BOUNCER_CLEAR }; }
-  function create(holders) { return { holders: holders || [], st: {}, stk: {}, minute: 0, flagged: [], count: 0, holderCount: 0 }; }
+  var req = typeof require !== 'undefined' ? require : null;
+  var CORE = g.PCBouncerCore || req('./bouncer-core.js'), MK = g.PCMarket || (req ? req('./market.js') : null);
+  var B = CORE.BOUNCER, PREFIX = 'p13:';
+  var holderId = CORE.holderId, topHolders = CORE.topHolders, levels = CORE.levels, create = CORE.create, step = CORE.step, sortRows = CORE.sortRows;
+  var K_AS_OF = '2026-10-23', K_LOCK_DAYS = 15, K_STORE = 'bouncerK', K_SALT = 'k2'; // k2: smooth lock-price spread (k1 hard-clipped, so ~22% of legs shared a capped K)
   /**
-   * One sim minute. mkt: { t: { K, S } } (K = insured level for that name, S = price now), minute = book minute,
-   * lv = { th, clr }, inv: { t: { sh, value } } Paracord-owned inventory (optional).
+   * Seeded protected prices for the demo crowd (sim mode). The demo has no price history before the Oct 23 snapshot, so each
+   * holder's lock-in price is a seeded stand-in: snapshot px x exp(daily vol x sqrt(sessions back) x z), squashed smoothly (tanh)
+   * into 0.90-1.04 x px; K = lock price x strike (90/92/95/97%). Lock dates: the 15 sessions up to Oct 23. Deterministic per
+   * (holder, ticker); computed once and stored (p13:bouncerK) - never from the page-load time, never reset by a new morning.
    */
-  function step(E, mkt, minute, lv, inv) {
-    E.minute = minute; inv = inv || {}; var stk = E.stk || (E.stk = {});
-    var by = {}, hs = {};
-    E.holders.forEach(function (h) {
-      h.legs.forEach(function (l) {
-        var m = mkt[l.t]; if (!m) return; var K = l.K > 0 ? l.K : m.K; if (!(K > 0)) return; // per-holder K if the leg carries one, else the name's K
-        var key = h.i + ':' + l.t, s = E.st[key] || (E.st[key] = { since: null, on: false, from: null });
-        var gap = (K - m.S) / K, cond = gap >= lv.th;
-        s.since = NU.since(s.since, cond, minute);
-        if (s.on) { if (gap < lv.clr) { s.on = false; s.from = null; } }
-        else if (NU.held(s.since, minute, B.BOUNCER_SUSTAIN_MIN)) { s.on = true; s.from = s.since; }
-        if (!s.on) return;
-        var gapUsd = Math.max(0, K - m.S) * l.sh, ctr = counterSize(gapUsd);
-        var c = by[l.t] || (by[l.t] = { t: l.t, S: m.S, Kmin: Infinity, Kmax: -Infinity, holders: [], n: 0, gapUsd: 0, counter: 0, worstGapPct: 0, firstFrom: Infinity,
-          invSh: inv[l.t] ? inv[l.t].sh : 0, invValue: inv[l.t] ? inv[l.t].value : 0 });
-        c.holders.push({ i: h.i, id: holderId(h.i), label: 'Holder #' + holderId(h.i), K: K, gapPct: gap, gapUsd: gapUsd, sh: l.sh, counter: ctr, minutes: minute - s.from });
-        c.n++; c.gapUsd += gapUsd; c.counter += ctr; c.worstGapPct = Math.max(c.worstGapPct, gap); c.Kmin = Math.min(c.Kmin, K); c.Kmax = Math.max(c.Kmax, K); c.firstFrom = Math.min(c.firstFrom, s.from);
-        hs[h.i] = 1;
-      });
-    });
-    for (var t in stk) if (!by[t]) delete stk[t]; // cleared: no holder in it is still past the clear level
-    var out = Object.keys(by).map(function (t) {
-      var c = by[t];
-      if (!stk[t]) stk[t] = { from: c.firstFrom }; // fixed when the stock is first flagged; holders joining later don't reset it
-      c.from = stk[t].from; c.minutes = minute - c.from;
-      c.gapPct = (c.Kmax - c.S) / c.Kmax; c.gapPerSh = Math.max(0, c.Kmax - c.S); c.gapPctLo = (c.Kmin - c.S) / c.Kmin; c.gapPerShLo = Math.max(0, c.Kmin - c.S);
-      c.holders.sort(function (a, b) { return b.gapUsd - a.gapUsd || a.id - b.id; }); delete c.firstFrom;
-      return c;
-    });
-    E.flagged = sortRows(out); E.count = out.length; E.holderCount = Object.keys(hs).length;
-    return E;
+  function seedDemoK(holders, defs) {
+    var dates = [], d = K_AS_OF; for (var i = 0; i < K_LOCK_DAYS; i++) { dates.unshift(d); d = MK.prevTradingDay(d); }
+    return CORE.seedK(holders, { lockDates: dates, salt: K_SALT, priceOn: function (t, date, r) {
+      var df = defs[t]; if (!df) return null; var px = df.px || df.p0; if (!(px > 0)) return null;
+      var n = dates.length - 1 - dates.indexOf(date), u = Math.max(1e-9, r()), v = r(), z = Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+      // log-move over n sessions at the name's vol, squashed smoothly (tanh) into 0.90..1.04 x the Oct 23 price: no hard clip, so no
+      // two holders share a K just because both hit a cap; K <= 1.04 x 0.97 of the price, so nobody starts past even the demo trigger
+      var r0 = (df.vol || 0.3) / Math.sqrt(252) * Math.sqrt(n) * z, lo = Math.log(0.90), hi = Math.log(1.04), mid = (lo + hi) / 2, hw = (hi - lo) / 2;
+      return px * Math.exp(mid + hw * Math.tanh((r0 - mid) / hw));
+    } });
   }
-  function sortRows(rows) { return rows.sort(function (a, b) { return b.gapUsd - a.gapUsd || (a.t < b.t ? -1 : a.t > b.t ? 1 : 0); }); }
   /* "Why am I seeing this?" tip: shown once ever, the first time the Bouncer fires; the % is the ACTIVE trigger */
   function fmtPct(x) { return String(+(x * 100).toFixed(1)) + '%'; }
   function triggerText(lv) { return 'Trigger: ' + fmtPct(lv.th) + ' gap (clears under ' + fmtPct(lv.clr) + ')'; }
   function tipDue(count, seen) { return count > 0 && !seen; }
   function tipText(lv, demo) {
-    return 'The red pulse means one or more of the top 10% of holders have a gap of at least ' + fmtPct(lv.th) + ' between their insured level and the stock price, held for ' + B.BOUNCER_SUSTAIN_MIN + ' minutes. Tap the button to see which stocks, how many holders, and the suggested actions.' +
+    return 'This is a risk alert only. The red pulse means that, in one or more stocks, at least one of the top 10% of holders has had a gap of ' + fmtPct(lv.th) + ' or more between their protected price (K) and the stock price for ' + B.BOUNCER_SUSTAIN_MIN + ' minutes of market session. Tap the button to see the stocks, how far each has dropped, how many holders are affected and their combined gap. It does not suggest any action.' +
       (demo ? ' Demo sensitivity is on, so the trigger is lowered from ' + fmtPct(B.BOUNCER_GAP_THRESHOLD) + ' to ' + fmtPct(lv.th) + '.' : '');
   }
-  var api = { fmtPct: fmtPct, triggerText: triggerText, tipDue: tipDue, tipText: tipText, holderId: holderId, topHolders: topHolders, counterSize: counterSize, levels: levels, create: create, step: step, sortRows: sortRows };
+  var api = { fmtPct: fmtPct, triggerText: triggerText, tipDue: tipDue, tipText: tipText, holderId: holderId, topHolders: topHolders, levels: levels, create: create, step: step, sortRows: sortRows, seedDemoK: seedDemoK, K_AS_OF: K_AS_OF, core: CORE };
   g.PCBouncer = api;
   if (typeof module !== 'undefined') module.exports = api;
   if (typeof document === 'undefined') return;
@@ -75,8 +45,19 @@
   /* ---------------- UI (browser) ---------------- */
   function load(k, d) { try { var v = localStorage.getItem(PREFIX + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } }
   function store(k, v) { try { localStorage.setItem(PREFIX + k, JSON.stringify(v)); } catch (e) {} }
-  var crowd = g.PCConfidence && g.PCConfidence.crowd, E = create(crowd && crowd.holders ? topHolders(crowd.holders) : []);
-  var demo = load('bouncerDemoSens', false) === true, tipSeen = load('bouncerTipSeen', false) === true, tipOn = false, tipShows = 0, open = false, lastMkt = null, lastInv = null;
+  var crowd = g.PCConfidence && g.PCConfidence.crowd, TOP = crowd && crowd.holders ? topHolders(crowd.holders).map(function (h) { return { i: h.i, insured: h.insured, legs: h.legs.map(function (l) { return { t: l.t, sh: l.sh }; }) }; }) : [];
+  // bouncerfix1: one fixed K per holder-leg, set at that holder's lock date, persisted with the demo state
+  var kStore = load(K_STORE, null), KMAP;
+  if (kStore && kStore.v === 1 && kStore.salt === K_SALT && kStore.k) KMAP = kStore.k;
+  else { KMAP = seedDemoK(TOP, g.PC_UNIVERSE_BY_T || {}); store(K_STORE, { v: 1, salt: K_SALT, asOf: K_AS_OF, seededAt: 'deterministic (holder, ticker); not time-based', k: KMAP }); }
+  CORE.applyK(TOP, KMAP, MK.nextTradingDay);
+  var E = create(TOP), lastClk = null, feedDrop = {};
+  // feed mode: 'sim' (default) prices every name incl. the fictional MOON; '?feed=real' previews a real market-data feed, which has
+  // no row for fictional tickers, so the Bouncer gets no MOON price and lists it under "No price data" (prices of real names stay
+  // simulated in this preview; the real-price run of this same engine is the offline replay)
+  var FEED = typeof location !== 'undefined' && /[?&]feed=real(&|$)/.test(location.search) ? 'real' : 'sim';
+  if (FEED === 'real') Object.keys(g.PC_UNIVERSE_BY_T || {}).forEach(function (t) { if (g.PC_UNIVERSE_BY_T[t].fictional) feedDrop[t] = 1; });
+  var demo = load('bouncerDemoSens', false) === true, tipSeen = load('bouncerTipSeen', false) === true, tipOn = false, tipShows = 0, open = false, lastMkt = null;
   function money(x, d) { return (x < 0 ? '−' : '') + '$' + Math.abs(x).toLocaleString('en-US', { minimumFractionDigits: d || 0, maximumFractionDigits: d || 0 }); }
   function pct(x) { return (x * 100).toFixed(1) + '%'; }
   function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
@@ -85,15 +66,14 @@
   btn.id = 'bouncer'; btn.className = 'bouncer'; btn.type = 'button'; btn.setAttribute('aria-label', 'Bouncer: no stocks flagged'); btn.setAttribute('aria-haspopup', 'dialog');
   btn.innerHTML = '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.5 21.5c1-1 2.3-1.7 3.5-2.5 2-1.3 3.3-2.4 3.3-3.6s-1-2.2-2.1-2.8"/><path d="M10.8 11.4C7.6 9.8 6.2 7.8 6.8 5.6 7.4 3.6 9.6 2.5 12 2.5s4.6 1.1 5.2 3.1c.6 2.2-1.7 4.6-5.2 6.4-2 1-3.3 2.2-3.3 3.4s1 2.2 2.1 2.9"/><path d="M13.2 19.8c1 .6 1.8 1.2 2.3 1.7"/></svg><span class="bouncer-badge" hidden></span>';
   document.body.appendChild(btn);
-  var toastEl = document.createElement('div'); toastEl.className = 'bouncer-toast'; toastEl.setAttribute('role', 'status'); toastEl.setAttribute('aria-live', 'polite'); document.body.appendChild(toastEl);
   var scrim = document.createElement('div'); scrim.className = 'bouncer-scrim'; scrim.hidden = true;
   scrim.innerHTML = '<section class="bouncer-panel" role="dialog" aria-modal="true" aria-labelledby="bouncerTitle"><div class="bouncer-grab"></div>' +
-    '<header class="bouncer-head"><div><h2 id="bouncerTitle">Bouncer</h2><div class="bouncer-sub" id="bouncerSub"></div></div><button class="bouncer-close" type="button" aria-label="Close" data-bx="close">✕</button></header>' +
+    '<header class="bouncer-head"><div><h2 id="bouncerTitle">Bouncer</h2><div class="bouncer-sub" id="bouncerSub"></div><div class="bouncer-session" id="bouncerSession" data-state=""></div></div><button class="bouncer-close" type="button" aria-label="Close" data-bx="close">✕</button></header>' +
     '<div class="bouncer-trigger" id="bouncerTrigger"></div><label class="bouncer-sens"><input type="checkbox" id="bouncerDemoSens"> Demo sensitivity <span id="bouncerSensTxt"></span></label>' +
     '<div class="bouncer-list" id="bouncerList"></div>' +
-    '<p class="bouncer-note">Demo only. Research, not legal advice: buying to support a price may raise market-manipulation questions — review with counsel.</p></section>';
+    '<p class="bouncer-note">Demo only. Risk information only: not a recommendation to buy, sell or take any other action.</p></section>';
   document.body.appendChild(scrim);
-  var listEl = scrim.querySelector('#bouncerList'), subEl = scrim.querySelector('#bouncerSub'), sensEl = scrim.querySelector('#bouncerDemoSens'), sensTxt = scrim.querySelector('#bouncerSensTxt'), trigEl = scrim.querySelector('#bouncerTrigger');
+  var listEl = scrim.querySelector('#bouncerList'), subEl = scrim.querySelector('#bouncerSub'), sensEl = scrim.querySelector('#bouncerDemoSens'), sensTxt = scrim.querySelector('#bouncerSensTxt'), trigEl = scrim.querySelector('#bouncerTrigger'), sessEl = scrim.querySelector('#bouncerSession');
   var tipEl = document.createElement('div'); tipEl.className = 'bouncer-tip'; tipEl.id = 'bouncerTip'; tipEl.hidden = true; tipEl.setAttribute('role', 'dialog'); tipEl.setAttribute('aria-labelledby', 'bouncerTipTitle');
   tipEl.innerHTML = '<b id="bouncerTipTitle">Why am I seeing this?</b><p id="bouncerTipText"></p><button type="button" class="bouncer-tip-ok" data-bx="tipok">Got it</button>';
   document.body.appendChild(tipEl);
@@ -155,66 +135,56 @@
     if (e.target === scrim) return toggle(false);
     var b = e.target.closest('[data-bx]'); if (!b) return;
     if (b.dataset.bx === 'close') return toggle(false);
-    if (b.dataset.bx === 'sim') simulate(b);
   });
   document.addEventListener('keydown', function (e) { if (open && e.key === 'Escape') toggle(false); });
-  sensEl.addEventListener('change', function () { demo = sensEl.checked; store('bouncerDemoSens', demo); E.st = {}; E.stk = {}; E.flagged = []; E.count = 0; E.holderCount = 0; if (lastMkt) step(E, lastMkt, E.minute, levels(demo), lastInv); paint(); if (open) renderList(true); });
-
-  var tT = null;
-  function toast(msg) { toastEl.textContent = msg; toastEl.classList.add('on'); clearTimeout(tT); tT = setTimeout(function () { toastEl.classList.remove('on'); }, 2600); }
-  function simulate(b) {
-    var c = E.flagged.filter(function (x) { return x.t === b.dataset.t; })[0];
-    var info = { demo: true, action: b.dataset.a, ticker: b.dataset.t || null, holders: c ? c.n : null, usd: b.dataset.usd ? +b.dataset.usd : null, shares: b.dataset.sh ? +b.dataset.sh : null, simMinute: E.minute };
-    console.info('[Bouncer demo] Simulate (no effect, nothing traded):', info);
-    var what = info.action === 'liquidate' ? 'liquidate ' + (info.shares || 0).toLocaleString() + ' sh of ' + info.ticker + ' inventory' : info.action === 'counter' ? 'buy a ' + money(info.usd || 0) + ' counter position in ' + info.ticker : 'watch ' + info.ticker;
-    toast('Simulated (demo, no effect): ' + what);
-  }
+  sensEl.addEventListener('change', function () { demo = sensEl.checked; store('bouncerDemoSens', demo); E.st = {}; E.stk = {}; E.flagged = []; E.count = 0; E.holderCount = 0; if (lastMkt) step(E, lastMkt, E.minute, levels(demo), lastClk); paint(); if (open) renderList(true); });
 
   /* one card per flagged stock; [data-f] fields are patched in place every tick (no re-render, no new warning) */
   function kTxt(c) { return c.Kmin === c.Kmax ? 'K ' + money(c.Kmax, 2) : 'K ' + money(c.Kmin, 2) + ' to ' + money(c.Kmax, 2); }
   function dropTxt(c) { return c.Kmin === c.Kmax ? 'gap <b>' + pct(c.gapPct) + '</b> · <b>' + money(c.gapPerSh, 2) + '</b>/sh below K'
     : 'gap <b>' + pct(c.gapPctLo) + '–' + pct(c.gapPct) + '</b> · <b>' + money(c.gapPerShLo, 2) + '–' + money(c.gapPerSh, 2) + '</b>/sh below K'; }
+  function staleTxt(c) { return c.stale ? '<span class="bx-stale">Price stale · no update for ' + c.staleMin + ' session-min</span>' : ''; }
+  /** live drop: today's move vs the previous session's close (app.js supplies prevCloseOf; factual, no direction implied) */
+  function chgTxt(c) { var f = api.prevCloseOf || (g.__paracord && g.__paracord.prevCloseOf), pc = f ? f(c.t) : null; if (!(pc > 0)) return ''; var x = c.S / pc - 1;
+    return '<span class="' + (x < 0 ? 'bx-down' : 'bx-up') + '">' + (x < 0 ? 'down ' : 'up ') + pct(Math.abs(x)) + '</span> vs prev close'; }
+  function lockTxt(h) { return h.lockedOn ? ' <small>locked ' + MK.dateLabel(h.lockedOn).slice(4) + '</small>' : ''; }
   function fields(c) {
     return {
-      now: 'now ' + money(c.S, 2), tot: money(c.gapUsd) + ' total gap', k: kTxt(c), drop: dropTxt(c),
-      n: '<b>' + c.n + '</b> top-10% holder' + (c.n === 1 ? '' : 's') + ' past the trigger', worst: 'worst holder gap <b>' + pct(c.worstGapPct) + '</b>', min: 'flagged ' + c.minutes + ' sim-min',
-      sum: 'Holders (' + c.n + ')',
-      liq: '<b>a</b> Liquidate excess inventory in ' + esc(c.t) + ': ' + c.invSh.toLocaleString(undefined, { maximumFractionDigits: 0 }) + ' sh on hand (' + money(c.invValue) + ')',
-      ctr: '<b>b</b> Counter position: ' + money(c.counter) + ' <small>(sum over ' + c.n + ' holder' + (c.n === 1 ? '' : 's') + ' of ' + Math.round(B.BOUNCER_COUNTER_PCT * 100) + '% of each gap $, cap ' + money(B.BOUNCER_PER_HOLDER_CAP) + ' per holder)</small>'
+      now: 'now ' + money(c.S, 2), chg: chgTxt(c), tot: money(c.gapUsd) + ' combined gap', k: kTxt(c), drop: dropTxt(c),
+      n: '<b>' + c.n + '</b> top-10% holder' + (c.n === 1 ? '' : 's') + ' past the trigger', worst: 'worst holder gap <b>' + pct(c.worstGapPct) + '</b>', min: 'flagged ' + c.minutes + ' session-min', stale: staleTxt(c),
+      sum: 'Holders (' + c.n + ')'
     };
   }
   function holdersHtml(c) {
-    return c.holders.map(function (h) { return '<div class="bx-h"><span>' + esc(h.label) + '</span><span>K ' + money(h.K, 2) + '</span><span>gap ' + pct(h.gapPct) + ' · ' + money(h.gapUsd) + '</span><span>' + h.sh.toLocaleString() + ' sh</span><span>' + h.minutes + ' sim-min</span></div>'; }).join('');
+    return c.holders.map(function (h) { return '<div class="bx-h"><span>' + esc(h.label) + '</span><span>K ' + money(h.K, 2) + lockTxt(h) + '</span><span>gap ' + pct(h.gapPct) + ' · ' + money(h.gapUsd) + '</span><span>' + h.sh.toLocaleString() + ' sh</span><span>' + h.minutes + ' session-min</span></div>'; }).join('');
   }
   function cardHtml(c) {
     var f = fields(c);
-    return '<article class="bx-row bx-stock" data-t="' + esc(c.t) + '"><div class="bx-top"><b class="bx-tk">' + esc(c.t) + '</b><span class="bx-now" data-f="now">' + f.now + '</span><span class="bx-tot" data-f="tot">' + f.tot + '</span></div>' +
+    return '<article class="bx-row bx-stock" data-t="' + esc(c.t) + '"><div class="bx-top"><b class="bx-tk">' + esc(c.t) + '</b><span class="bx-now" data-f="now">' + f.now + '</span><span class="bx-chg" data-f="chg">' + f.chg + '</span><span class="bx-tot" data-f="tot">' + f.tot + '</span></div>' +
+      '<div class="bx-stale-line" data-f="stale">' + f.stale + '</div>' +
       '<div class="bx-line"><span data-f="k">' + f.k + '</span><span class="bx-drop" data-f="drop">' + f.drop + '</span></div>' +
       '<div class="bx-line bx-gap"><span data-f="n">' + f.n + '</span><span data-f="worst">' + f.worst + '</span><span data-f="min">' + f.min + '</span></div>' +
-      '<details class="bx-holders"><summary data-f="sum">' + f.sum + '</summary><div class="bx-hlist"></div></details>' +
-      '<div class="bx-acts"><div class="bx-act"><span data-f="liq">' + f.liq + '</span><button type="button" data-bx="sim" data-a="liquidate" data-t="' + esc(c.t) + '" data-sh="' + Math.round(c.invSh) + '">Simulate</button></div>' +
-      '<div class="bx-act"><span data-f="ctr">' + f.ctr + '</span><button type="button" data-bx="sim" data-a="counter" data-t="' + esc(c.t) + '" data-usd="' + Math.round(c.counter) + '">Simulate</button></div>' +
-      '<div class="bx-act"><span><b>c</b> Do nothing / watch</span><button type="button" data-bx="sim" data-a="watch" data-t="' + esc(c.t) + '">Simulate</button></div></div></article>';
+      '<details class="bx-holders"><summary data-f="sum">' + f.sum + '</summary><div class="bx-hlist"></div></details></article>';
   }
   function patchCard(el, c) {
     var f = fields(c);
     el.querySelectorAll('[data-f]').forEach(function (x) { var v = f[x.dataset.f]; if (v != null && x.innerHTML !== v) x.innerHTML = v; });
-    var bl = el.querySelector('[data-a="liquidate"]'), bc = el.querySelector('[data-a="counter"]');
-    if (bl) bl.dataset.sh = Math.round(c.invSh); if (bc) bc.dataset.usd = Math.round(c.counter);
     var d = el.querySelector('.bx-holders'); if (d && d.open) { var hl = d.querySelector('.bx-hlist'), hh = holdersHtml(c); if (hl.innerHTML !== hh) hl.innerHTML = hh; }
   }
   var cardsMade = 0; // diagnostics: how many cards were ever created (one per stock flag-up)
   function renderList(force) {
     var lv = levels(demo);
     trigEl.textContent = triggerText(lv) + (demo ? ' · demo sensitivity' : '');
-    subEl.textContent = E.count ? E.count + ' stock' + (E.count === 1 ? '' : 's') + ' flagged · ' + E.holderCount + ' of ' + E.holders.length + ' top-10% holders · gap ≥ ' + fmtPct(lv.th) + ' for ' + B.BOUNCER_SUSTAIN_MIN + ' sim-min · sorted by total gap $'
+    subEl.textContent = E.count ? E.count + ' stock' + (E.count === 1 ? '' : 's') + ' flagged · ' + E.holderCount + ' of ' + E.holders.length + ' top-10% holders · gap ≥ ' + fmtPct(lv.th) + ' for ' + B.BOUNCER_SUSTAIN_MIN + ' session-min · sorted by combined gap $'
       : 'Watching the top 10% of holders (' + E.holders.length + ') by insured value. Nothing concerning.';
     var dl = levels(true); sensTxt.textContent = '(' + fmtPct(dl.th) + ' / ' + fmtPct(dl.clr) + ' instead of ' + fmtPct(B.BOUNCER_GAP_THRESHOLD) + ' / ' + fmtPct(B.BOUNCER_CLEAR) + '; for demos)';
+    sessionLine();
+    var np = notesHtml(), nEl = listEl.querySelector('.bx-notes');
     var empty = listEl.querySelector('.bx-empty');
     if (!E.flagged.length) {
       listEl.querySelectorAll('.bx-stock').forEach(function (el) { el.remove(); });
       if (!empty) listEl.innerHTML = '<div class="bx-empty">No stock has a holder past the trigger right now.' + (demo ? ' Try Demo → Crash.' : ' A Demo → Crash rarely opens a ' + fmtPct(lv.th) + ' gap; turn on Demo sensitivity to see it fire.') + '</div>';
-      return;
+      setNotes(np); return;
     }
     if (empty) empty.remove();
     var have = {}; listEl.querySelectorAll('.bx-stock').forEach(function (el) { have[el.dataset.t] = el; });
@@ -226,10 +196,33 @@
       if (!el) { var tmp = document.createElement('div'); tmp.innerHTML = cardHtml(c); el = tmp.firstChild; cardsMade++; }
       else patchCard(el, c);
       var next = prev ? prev.nextSibling : listEl.firstChild;
-      if (el !== next) listEl.insertBefore(el, next); // keep sorted by total gap $ (moves the node; open holder lists stay open)
+      if (el !== next) listEl.insertBefore(el, next); // keep sorted by combined gap $ (moves the node; open holder lists stay open)
       prev = el;
     });
-    listEl.scrollTop = st;
+    setNotes(np); listEl.scrollTop = st;
+  }
+  function notesHtml() {
+    var a = [];
+    if (E.noPrice && E.noPrice.length) a.push('<div class="bx-note bx-noprice">No price data: ' + E.noPrice.map(function (x) { return '<b>' + esc(x.t) + '</b> (' + x.legs + ' top-holder position' + (x.legs === 1 ? '' : 's') + ')'; }).join(', ') + ' - not watched until a price arrives.</div>');
+    var st = (E.stale || []).filter(function (x) { return !E.flagged.some(function (c) { return c.t === x.t; }); });
+    if (st.length) a.push('<div class="bx-note bx-stalenote">Stale prices (no update for more than ' + B.BOUNCER_STALE_HOLD_MIN + ' session-min): ' + st.slice(0, 8).map(function (x) { return esc(x.t); }).join(', ') + (st.length > 8 ? ' +' + (st.length - 8) + ' more' : '') + '.</div>');
+    return a.join('');
+  }
+  function setNotes(h) {
+    var el = listEl.querySelector('.bx-notes');
+    if (!h) { if (el) el.remove(); return; }
+    if (!el) { el = document.createElement('div'); el.className = 'bx-notes'; }
+    if (el.innerHTML !== h) el.innerHTML = h;
+    if (el !== listEl.lastChild) listEl.appendChild(el);
+  }
+  function sessionLine() {
+    if (!sessEl) return;
+    var L = lastClk && lastClk.at != null && MK ? MK.label(lastClk.at) : null;
+    if (!L) { sessEl.textContent = ''; return; }
+    var h = '<i class="bx-dot"></i><b>' + esc(L.title) + '</b> · ' + esc(L.text) + (L.state === 'open' ? ' · ' + L.minsLeft + ' min left' : '') +
+      '<div class="bx-sess-note">' + (FEED === 'real' ? 'Feed: real-data mode (preview). ' : '') + (L.state === 'open' ? 'Sustain counts session minutes; timers reset at the close.' : 'Alerts stay up while closed; sustain timers restart at the next open.') + '</div>';
+    if (sessEl.dataset.state !== L.state) sessEl.dataset.state = L.state;
+    if (sessEl.innerHTML !== h) sessEl.innerHTML = h;
   }
   listEl.addEventListener('toggle', function (e) { var d = e.target; if (!d.classList || !d.classList.contains('bx-holders') || !d.open) return; var el = d.closest('.bx-stock'), c = E.flagged.filter(function (x) { return x.t === el.dataset.t; })[0]; if (c) d.querySelector('.bx-hlist').innerHTML = holdersHtml(c); }, true);
   function paint() {
@@ -240,14 +233,21 @@
     btn.setAttribute('aria-label', n ? 'Bouncer: ' + n + ' stock' + (n === 1 ? '' : 's') + ' flagged, open details' : 'Bouncer: no stocks flagged');
     if (open) renderList(false);
   }
-  /** called by app.js once per sim tick with the crowd snapshot (confidence.js compute) and the running book */
-  api.tick = function (cr, book) {
-    if (!cr || !cr.legs) return;
-    var mkt = {}; cr.legs.forEach(function (l) { mkt[l.d.t] = { K: l.K, S: l.S }; });
-    var inv = {}; if (book && book.inv) Object.keys(book.inv).forEach(function (t) { var I = book.inv[t]; inv[t] = { sh: I.sh, value: I.sh * (I.px || 0) }; });
-    lastMkt = mkt; lastInv = inv;
-    step(E, mkt, book ? book.minutes : E.minute + 1, levels(demo), inv); paint();
+  /** called by app.js once per sim tick with the crowd snapshot (confidence.js compute), the running book and the market clock
+   *  clk = { at: sim market instant (ms), key: session date, ord: PCMarket.ordinal, open } (bouncerfix1). Per-holder K comes
+   *  from the stored seed, not from the crowd snapshot; the snapshot only supplies prices. */
+  api.tick = function (cr, book, clk) {
+    var mkt = {};
+    if (cr && cr.legs) cr.legs.forEach(function (l) { if (!feedDrop[l.d.t]) mkt[l.d.t] = { K: l.K, S: l.S }; });
+    else if (!(clk && clk.open === false)) return;
+    lastMkt = mkt; lastClk = clk || null;
+    step(E, mkt, book ? book.minutes : E.minute + 1, levels(demo), clk || null); paint();
+    if (open) sessionLine();
   };
+  /** test / demo hook: leave these tickers out of the feed (simulates a dropped or missing real-data feed row) */
+  api.feedDrop = function (list) { feedDrop = {}; if (FEED === 'real') Object.keys(g.PC_UNIVERSE_BY_T || {}).forEach(function (t) { if (g.PC_UNIVERSE_BY_T[t].fictional) feedDrop[t] = 1; }); (list || []).forEach(function (t) { feedDrop[t] = 1; }); };
+  api.kmap = function () { return KMAP; };
   api.reset = function () { E = create(E.holders); paint(); };
-  api.state = function () { return { count: E.count, holderCount: E.holderCount, cardsMade: cardsMade, flagged: E.flagged, minute: E.minute, demo: demo, levels: levels(demo), tipShown: tipOn, tipSeen: tipSeen, tipShows: tipShows, holders: E.holders.length, open: open }; };
+  api.reseedK = function () { KMAP = seedDemoK(TOP, g.PC_UNIVERSE_BY_T || {}); store(K_STORE, { v: 1, salt: K_SALT, asOf: K_AS_OF, seededAt: 'deterministic (holder, ticker); not time-based', k: KMAP }); CORE.applyK(TOP, KMAP, MK.nextTradingDay); E = create(TOP); paint(); };
+  api.state = function () { return { count: E.count, holderCount: E.holderCount, cardsMade: cardsMade, flagged: E.flagged, minute: E.minute, session: E.key, feed: FEED, marketOpen: E.open, noPrice: E.noPrice, stale: E.stale, clk: lastClk, demo: demo, levels: levels(demo), tipShown: tipOn, tipSeen: tipSeen, tipShows: tipShows, holders: E.holders.length, open: open }; };
 })(typeof window !== 'undefined' ? window : globalThis);

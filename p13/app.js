@@ -11,7 +11,8 @@
   var DAY = 24 * 3600 * 1000, MIN = 60000;
   var NEWS_TAU_MIN = 20, NEWS_WINDOW_MIN = 30; // per paracord-pricing-v1.md
   var RC = window.PARACORD_RATE_CONSTANTS;
-  var SIMMIN_YEARS = 1 / (1440 * 252); // v4 floor clock: one 24h sim-day of 24/7 cover = one trading day (no market calendar in the demo)
+  var SIMMIN_YEARS = 1 / (1440 * 252); // v4 floor clock: one 24h sim-day of 24/7 cover = one trading day (billing clock; the market clock below is separate)
+  var MK = window.PCMarket; // bouncerfix1: NYSE calendar (market.js) - the trading clock, the Bouncer and the price alerts run on real session dates / times
 
   /* ---------------- state ---------------- */
   function freshState() {
@@ -27,6 +28,12 @@
   // tabs1: saved p12 state - add the large demo portfolio to the default accounts that are still linked (once)
   if (!state.pf1) { (window.PC_BIG_PORTFOLIO || []).forEach(function (x) { if (state.linked.indexOf(x[2]) >= 0) state.holdings.push({ acct: x[2], t: x[0], sh: x[1] }); }); state.pf1 = 1; }
   if (state.sold == null) state.sold = 0; if (!state.sales) state.sales = [];
+  // bouncerfix1: simulated MARKET clock (UTC ms on the real calendar). Starts at the real time of the first load, then advances
+  // one session minute per tick, shows the close once, and jumps over nights, weekends and NYSE holidays to the next open.
+  // Saved with the demo state, so a reload continues where it was. pc = closes of the last finished sim session (price-alert previous close).
+  function mktFresh() { return { at: Math.floor(Date.now() / MIN) * MIN }; }
+  if (!state.mkt || !(state.mkt.at > 0)) state.mkt = mktFresh();
+  if (!state.pc) state.pc = { date: null, px: {} };
 
   if (!state.conf) state.conf = { target: 0, mood: 0, open: null };
   // monotonic premium counters: gross charged per policy and in total (rebates credited separately, cash-outs don't reduce them)
@@ -52,9 +59,31 @@
   }
   function sharesOf(t) { return shMap()[t] || 0; }
   function acctsOf(t) { var o = []; state.holdings.forEach(function (h) { if (h.t === t && h.sh > 0 && state.linked.indexOf(h.acct) >= 0 && o.indexOf(h.acct) < 0) o.push(h.acct); }); return o; }
-  var nudge = window.PCNudge ? window.PCNudge.create() : null, nudgeMin = 0; // nudge1: coverage nudges (nudge.js); resets on page load / demo reset like the book
+  /* bouncerfix1: customer-set price alerts (alerts.js), opt-in per stock, persisted in localStorage p13:alerts. Replaces the
+   * automatic coverage nudges. The preview seeds a few demo alerts (demo: true) on first load so it shows them working. */
+  var AL = window.PCAlerts, ALERTS_KEY = 'p13:alerts', alerts = null, alertHits = [];
+  function alertsSave() { try { localStorage.setItem(ALERTS_KEY, JSON.stringify(alerts)); } catch (e) {} }
+  function alertsSeed() {
+    alerts = AL.create(); alerts.seeded = 1;
+    // demo seeds on the three largest positions (top of the Portfolio list) with small thresholds so they trigger in the preview,
+    // plus one wider alert on WMT that normally stays untriggered (shows a set-but-quiet alert)
+    var top = heldTickers().map(function (d) { return d.t; }).sort(function (x, y) { return sharesOf(y) * prevCloseOf(y) - sharesOf(x) * prevCloseOf(x); }).slice(0, 3);
+    if (!/[?&]alerts=none\b/.test(location.search)) [[top[0], { down: 0.25 }], [top[1], { down: 0.5, up: 0.5 }], [top[2], { level: 'L', f: 0.998 }], ['WMT', { up: 5 }]].forEach(function (x) {
+      if (!x[0] || !BY_T[x[0]]) return;
+      var px = prevCloseOf(x[0]), c = x[1]; if (!(px > 0)) return;
+      if (c.level === 'L') c = { level: +(px * c.f).toFixed(2) };
+      AL.set(alerts, x[0], c, px, { demo: true });
+    });
+    alertsSave();
+  }
+  function alertsLoad() { var raw = null; try { raw = localStorage.getItem(ALERTS_KEY); } catch (e) {} if (raw) { try { alerts = AL.fromJSON(JSON.parse(raw)); return; } catch (e) {} } alertsSeed(); }
   function heldTickers() { var m = shMap(); return Object.keys(m).filter(function (t) { return m[t] > 0 && BY_T[t] && sim.has(t); }).map(function (t) { return BY_T[t]; }); }
   function openOf(t) { return state.open[t] || sim.openAll[t]; }
+  /** bouncerfix1: previous session close (price alerts and the Bouncer's live drop): the close recorded when the sim's last session ended, else the
+   *  real Oct 23 close from the demo snapshot (the snapshot the sim starts from). Never the open / page-load price. */
+  function prevCloseOf(t) { var v = state.pc && state.pc.px[t]; if (v > 0) return v; var d = BY_T[t]; return (d && (d.px || d.p0)) || openOf(t); }
+  if (AL) alertsLoad();
+  function mktClk() { var S = MK.status(state.mkt.at); return { at: state.mkt.at, key: S.open ? S.date : (S.state === 'after' ? S.date : null), ord: MK.ordinal(state.mkt.at), open: S.open, S: S }; }
   function chg(t) { var o = openOf(t), p = sim.price(t); return (p - o) / o; }
   function annVol(t) { return sim.sigma1(t) * Math.sqrt(window.PCSim.TICKS_PER_YEAR); }
 
@@ -270,23 +299,23 @@
    * The house / backend book moved to the Demo tab. Rows only refresh while on screen (IntersectionObserver) so the full
    * ~504-position list stays smooth on phones; off-screen rows refresh as they scroll into view. */
   function capped(t) { return !state.ins[t] && capFor(t, sim.price(t)) === 0; }
-  /* nudge1: the nudge to show on a row right now (red only while uncovered and not capped, green only while covered), or null */
-  function nudgeOf(t) {
-    var n = nudge && nudge.shown && nudge.shown[t]; if (!n) return null;
-    if (n.kind === 'red' && (state.ins[t] || capped(t))) return null;
-    if (n.kind === 'green' && !state.ins[t]) return null;
-    return n;
+  /* bouncerfix1: price alerts on the row: a neutral highlight with factual copy and Dismiss; red/green only on the up/down figure */
+  function hitsOf(t) { return alertHits.filter(function (h) { return h.t === t; }); }
+  function alertTxtHtml(h) {
+    var cls2 = h.change == null ? '' : h.change < 0 ? 'down' : 'up', tx = esc(h.text);
+    var m = h.kind !== 'level' && h.change != null ? tx.replace(/(down|up) (\d+\.\d%)/, '<b class="' + cls2 + '">$1 $2</b>') : tx;
+    return '<span class="pf-alert-txt">' + m + '</span>';
   }
-  function nudgeHtml(n, t) { return n ? '<span class="pf-nudge-txt">' + esc(window.PCNudge.copy(n)) + '</span><button class="pf-nudge-x" data-act="nudge-dismiss" data-t="' + t + '">Not now</button>' : ''; }
-  function nudgeCls(n) { return n ? (n.kind === 'red' ? ' nudge-red' : ' nudge-green') : ''; }
+  function alertHtml(hs, t) { return hs.length ? hs.map(alertTxtHtml).join('') + '<button class="pf-alert-x" data-act="alert-dismiss" data-t="' + t + '">Dismiss</button>' : ''; }
+  function alertKey(hs) { return hs.map(function (h) { return h.kind + ':' + h.text; }).join('|'); }
   function pfRow(t) {
-    var d = BY_T[t], ins = state.ins[t], n = sharesOf(t), cp = capped(t), ng = nudgeOf(t);
-    return '<div class="pf-row' + nudgeCls(ng) + '" role="button" tabindex="0" data-act="open-stock" data-t="' + t + '" data-pf="' + t + '">' +
-      '<div class="pf-id"><div><b>' + t + '</b> <span class="pf-sh' + (ins && ins.shares < n ? ' part' : '') + '" data-pf-sh>' + (ins && ins.shares < n ? ins.shares + '/' : '') + n.toLocaleString() + ' sh</span></div><div class="pf-nm">' + esc(d.name.replace(/ \(.*\)/, '')) + '</div>' + (ins ? '<div class="pf-cov" data-pf-cov></div>' : '') + '</div>' +
+    var d = BY_T[t], ins = state.ins[t], n = sharesOf(t), cp = capped(t), hs = hitsOf(t), al = AL && AL.get(alerts, t);
+    return '<div class="pf-row' + (hs.length ? ' alert-hit' : '') + '" role="button" tabindex="0" data-act="open-stock" data-t="' + t + '" data-pf="' + t + '">' +
+      '<div class="pf-id"><div><b>' + t + '</b> <span class="pf-sh' + (ins && ins.shares < n ? ' part' : '') + '" data-pf-sh>' + (ins && ins.shares < n ? ins.shares + '/' : '') + n.toLocaleString() + ' sh</span></div><div class="pf-nm">' + esc(d.name.replace(/ \(.*\)/, '')) + '</div>' + (al ? '<div class="pf-bell" data-pf-bell title="Price alert set">🔔 ' + esc(AL.summary(al)) + '</div>' : '') + (ins ? '<div class="pf-cov" data-pf-cov></div>' : '') + '</div>' +
       '<div class="pf-q"><div class="pf-v" data-pf-v></div><div class="pf-c" data-pf-c></div></div>' +
       '<button class="toggle sm' + (cp ? ' capped' : '') + '" role="switch" aria-label="Coverage ' + t + '" aria-checked="' + (!!ins) + '"' + (cp ? ' aria-disabled="true" title="Coverage limit"' : '') + ' data-act="toggle-ins" data-t="' + t + '"></button>' +
       '<button class="pf-sell" data-act="sell" data-t="' + t + '" aria-label="Sell ' + t + '">Sell</button>' +
-      '<div class="pf-nudge" data-pf-nudge="' + (ng ? ng.kind : '') + '" role="status">' + nudgeHtml(ng, t) + '</div></div>';
+      '<div class="pf-alert" data-pf-alert="' + esc(alertKey(hs)) + '" role="status">' + alertHtml(hs, t) + '</div></div>';
   }
   function viewHome() {
     // order by position value, fixed for the session so rows don't jump on re-render (new holdings append; sold ones drop out)
@@ -309,11 +338,9 @@
     if (cv && ins) { var kt = '🔒 ' + money(ins.lockIn, 2) + ' · ' + rateStr(rateOf(t)); if (cv.textContent !== kt) cv.textContent = kt; }
     var sw = el.querySelector('.toggle'), cp = capped(t);
     if (sw.classList.contains('capped') !== cp) { sw.classList.toggle('capped', cp); if (cp) { sw.setAttribute('aria-disabled', 'true'); sw.title = 'Coverage limit'; } else { sw.removeAttribute('aria-disabled'); sw.removeAttribute('title'); } }
-    var nb = el.querySelector('[data-pf-nudge]'); if (!nb) return; // nudge1
-    var ng = nudgeOf(t), nk = ng ? ng.kind : '', nh = nudgeHtml(ng, t);
-    if (nb.dataset.pfNudge !== nk) { nb.dataset.pfNudge = nk; el.classList.toggle('nudge-red', nk === 'red'); el.classList.toggle('nudge-green', nk === 'green'); }
-    var tx = nb.querySelector('.pf-nudge-txt');
-    if (!ng) { if (nb.innerHTML) nb.innerHTML = ''; } else if (!tx) nb.innerHTML = nh; else { var ct2 = window.PCNudge.copy(ng); if (tx.textContent !== ct2) tx.textContent = ct2; }
+    var nb = el.querySelector('[data-pf-alert]'); if (!nb) return; // bouncerfix1: price alerts
+    var hs = hitsOf(t), ak = alertKey(hs);
+    if (nb.dataset.pfAlert !== ak) { nb.dataset.pfAlert = ak; nb.innerHTML = alertHtml(hs, t); el.classList.toggle('alert-hit', hs.length > 0); }
   }
   function pfSetup() {
     if (pfObs) { pfObs.disconnect(); pfObs = null; } pfVis = {};
@@ -384,6 +411,20 @@
       '<div class="small muted" style="margin-top:8px">Draft pricing v4 with the p9 volatility lock (placeholder, rate.js → insuranceRatePerMinute; paracord-pricing-v4.md). Prices, implied vol, F (shares outstanding) and ADV come from a demo snapshot, as of Oct 23, 2026 (not live; some values estimated); MOON is fictional. Demo clock: one 24h sim-day counts as one trading day.</div></details></div>';
   }
 
+  /** bouncerfix1: price alert setup on the stock page. Opt-in, none by default; % moves are measured from the previous close. */
+  function alertCard(t) {
+    if (!AL) return '';
+    var a = AL.get(alerts, t), pc = prevCloseOf(t), hs = hitsOf(t), v = function (x) { return x == null ? '' : String(x); };
+    return '<div class="card alert-card" id="alertCard" data-t="' + t + '"><div class="row between"><h3 style="margin:0">Price alert</h3><span class="small muted" data-alert-state>' + (a ? '🔔 ' + esc(AL.summary(a)) + (a.demo ? ' · demo' : '') : 'None set') + '</span></div>' +
+      '<div class="small muted" style="margin:4px 0 8px">Get a highlight on this stock when it moves. Percent moves are from the previous close (' + money(pc, 2) + '). Information only.</div>' +
+      '<div class="pf-alert alert-detail" role="status" data-alert-hits="' + esc(alertKey(hs)) + '">' + alertHtml(hs, t) + '</div>' +
+      '<div class="alert-form"><label>Down by<span><input type="number" inputmode="decimal" step="0.1" min="0.1" max="50" name="down" placeholder="—" value="' + v(a && a.down) + '">%</span></label>' +
+      '<label>Up by<span><input type="number" inputmode="decimal" step="0.1" min="0.1" max="50" name="up" placeholder="—" value="' + v(a && a.up) + '">%</span></label>' +
+      '<label>Price crosses<span>$<input type="number" inputmode="decimal" step="0.01" min="0.01" name="level" placeholder="—" value="' + v(a && a.level) + '"></span></label></div>' +
+      (a && a.level != null ? '<div class="small muted">Level alert fires when the price ' + (a.levelDir === 'below' ? 'falls to' : 'rises to') + ' ' + money(a.level, 2) + '.</div>' : '') +
+      '<div class="small alert-err" data-alert-err></div>' +
+      '<div class="row" style="gap:8px;margin-top:8px"><button class="btn sm" data-act="alert-save" data-t="' + t + '">' + (a ? 'Update alert' : 'Set alert') + '</button>' + (a ? '<button class="btn sm ghost" data-act="alert-remove" data-t="' + t + '">Remove</button>' : '') + '</div></div>';
+  }
   function viewStock(t) {
     var d = BY_T[t], n = sharesOf(t);
     return '<div class="row between"><div><div class="big" data-live="price:' + t + '"></div><div data-live="chg:' + t + '"></div></div>' +
@@ -394,6 +435,7 @@
       '<div class="card"><h3>Your holding</h3><div class="grid2"><div class="stat"><div class="k">Shares</div><div class="v">' + n + '</div></div>' +
       '<div class="stat"><div class="k">Value</div><div class="v" data-live="value:' + t + '"></div></div></div>' +
       '<div class="badges" style="margin-top:10px">' + state.holdings.filter(function (h) { return h.t === t && h.sh > 0 && state.linked.indexOf(h.acct) >= 0; }).map(function (h) { return bb(h.acct) + '<span class="small muted" style="align-self:center">' + h.sh + ' sh</span>'; }).join('') + '</div></div>' +
+      alertCard(t) +
       (n ? insuranceCard(t) : '<div class="card muted">No shares held in linked demo accounts.</div>') +
       '<div class="footer-note">Demo — simulated prices, no real trades.</div>';
   }
@@ -411,10 +453,10 @@
 
   function demoControls() {
     var sp = state.clock.speed;
-    return '<div class="card"><h3>Demo clock</h3><div class="small muted">Sim time: <b data-live="simclock"></b></div>' +
+    return '<div class="card"><h3>Demo clock</h3><div class="small muted">Sim time: <b data-live="simclock"></b></div><div class="small muted" style="margin-top:4px">Market clock: <b data-live="mktclock"></b></div>' +
       '<div class="seg" style="margin:10px 0">' + [1, 60, 600].map(function (x) { return '<button class="' + (sp === x ? 'on' : '') + '" data-act="speed" data-x="' + x + '">×' + x + '</button>'; }).join('') + '</div>' +
       '<div class="grid2"><button class="btn ghost" data-act="skip" data-ms="3600000">⏩ Skip 1 hour</button><button class="btn ghost" data-act="skip" data-ms="' + DAY + '">⏩ Skip 24 hours</button></div>' +
-      '<div class="small muted" style="margin-top:8px">Fast-forward accrues insurance cost at the current rate and advances the 24h discount progress.</div></div>' +
+      '<div class="small muted" style="margin-top:8px">Fast-forward accrues insurance cost at the current rate and advances the 24h discount progress. The market clock moves one session minute per tick on the real NYSE calendar (weekends, holidays, early closes, ET with DST); a skip moves it the same calendar time.</div></div>' +
       '<div class="card" id="member-settings"><h3>Membership</h3>' + (isMember() ? memberBadge() + '<div class="small muted" style="margin:6px 0" id="member-renew-note">' + planOf(state.member).name + ' plan · renewal is ' + (state.member.autoRenew ? 'on: renews ' + planOf(state.member).every + ' at ' + feeTxt(planOf(state.member).fee) : 'cancelled') + '. Cancelling takes effect at the end of the current ' + planOf(state.member).per + '; the current ' + planOf(state.member).per + ' is non-refundable and stays active until ' + dateStr(state.member.until) + '.</div>' +
         '<button class="btn sm ghost" id="memberCancel" data-act="member-autorenew">' + (state.member.autoRenew ? 'Cancel renewal' : 'Resume renewal') + '</button> <span class="small muted">(demo only)</span>' : '<div class="small muted">Not a member. Monthly ' + feeTxt(PLANS.monthly.fee) + '/month or Yearly ' + feeTxt(PLANS.yearly.fee) + '/year, non-refundable for the current billing period; shown with full terms when you first turn on insurance.</div>') + '</div>' +
       '<div class="card"><h3>Reset</h3><button class="btn danger" data-act="reset">Reset demo</button><div class="small muted" style="margin-top:8px">Clears insured flags, lock-ins, timestamps, membership, linked accounts and receipts from this browser.</div></div>';
@@ -570,47 +612,51 @@
       net: { cur: 0, hi: -Infinity, hiM: m, lo: Infinity, loM: m }, aft: { cur: 0, hi: -Infinity, hiM: m, lo: Infinity, loM: m } };
   }
   function netRec(r, v, m) { r.cur = v; if (v > r.hi) { r.hi = v; r.hiM = m; } if (v < r.lo) { r.lo = v; r.loM = m; } }
-  function netTrack(B) {
+  function netTrack(B, C) {
     if (!B) return;
-    var day = Math.floor(Math.max(0, B.minutes - 1e-9) / NET_SESSION) + 1, m = B.minutes - (day - 1) * NET_SESSION;
-    if (!netDay || netDay.day !== day) netDay = netDayNew(day, day === 1 || !netLast ? { col: 0, cash: 0, sh: {} } : netLast, m);
+    // bouncerfix1: one Net-today range per real session date (390 or 210 session minutes); m = session minute (9:30 + m = the clock time)
+    var day = C ? C.S.date : Math.floor(Math.max(0, B.minutes - 1e-9) / NET_SESSION) + 1, m = C ? C.S.m : B.minutes - (day - 1) * NET_SESSION;
+    if (!netDay || netDay.day !== day) { netDay = netDayNew(day, !netDay || !netLast ? { col: 0, cash: 0, sh: {} } : netLast, m); netDay.len = C ? C.S.len : NET_SESSION; }
     var N = netDay, mv = 0;
     Object.keys(B.inv).forEach(function (t) { mv += (B.inv[t].sh - (N.sh0[t] || 0)) * B.inv[t].px; });
     var net = (B.collected - N.col0) - (B.cashOut - N.cash0) + mv, aft = net - (B.open || 0);
     netRec(N.net, net, m); netRec(N.aft, aft, m); N.m = m;
     N.colT = B.collected - N.col0; N.cashT = B.cashOut - N.cash0; N.mvT = mv; // p11: today's parts, shown under the panel title
-    N.hist.push([m, net, aft]); if (N.hist.length > NET_SESSION + 2) N.hist.shift();
+    N.hist.push([m, net, aft]); if (N.hist.length > (N.len || NET_SESSION) + 2) N.hist.shift();
     netLast = netSnap(B);
   }
   function tradeClock(m) { var t = 9 * 60 + 30 + Math.round(m), h = Math.floor(t / 60), mm = t % 60; return (h > 12 ? h - 12 : h) + ':' + String(mm).padStart(2, '0') + (h >= 12 ? ' pm' : ' am'); }
-  /* ---------------- p12: trading-day clock (the book's clock, same as Net today) ----------------
-   * Book minutes since page load / reset; 1 tick = 1 trading minute; 390 sim-min per day (9:30 am–4:00 pm), then the next
-   * tick opens the next sim day at 9:31 (the crowd book has no overnight, so there is no After-hours state).
-   * minutes = 0: Pre-market (book not started) · 0 < m < 390: Open · m = 390: Closed (4:00 pm bell; rolls to day + 1 next tick). */
-  function tcParts(minutes) {
-    var day = Math.floor(Math.max(0, minutes - 1e-9) / NET_SESSION) + 1, m = Math.max(0, minutes - (day - 1) * NET_SESSION);
-    var st = minutes <= 0 ? 'Pre-market' : m >= NET_SESSION - 1e-9 ? 'Closed' : 'Open';
-    var t = 9 * 60 + 30 + Math.floor(m + 1e-9), h = Math.floor(t / 60), mm = t % 60;
-    return { day: day, m: m, pct: Math.min(1, m / NET_SESSION), status: st, time: (h > 12 ? h - 12 : h) + ':' + String(mm).padStart(2, '0'), ap: h >= 12 ? 'PM' : 'AM' };
+  /* ---------------- p12 trading-day clock, on the real market calendar (bouncerfix1) ----------------
+   * The sim market clock (state.mkt.at) walks real session dates and New York times: 9:30 AM open, 4:00 PM close (1:00 PM on NYSE
+   * early-close days, a 210-minute session), weekends and NYSE holidays skipped, DST handled. 1 tick = 1 session minute.
+   * Statuses: Open · Closed (after the bell / weekend / holiday) · Pre-market. */
+  function tcParts() {
+    var at = state.mkt.at, S = MK.status(at), len = S.len || 390, e = S.et;
+    var m = S.open ? S.m : S.state === 'after' ? len : 0;
+    var st = S.open ? 'Open' : S.state === 'pre' ? 'Pre-market' : 'Closed';
+    return { day: S.date, label: MK.dateLabel(S.date), m: m, len: len, pct: Math.min(1, m / len), status: st, why: S.state === 'closed' ? S.reason : S.early ? 'Early close 1:00 PM' : '',
+      time: (e.h % 12 || 12) + ':' + String(e.mi).padStart(2, '0'), ap: e.h >= 12 ? 'PM' : 'AM', S: S };
   }
   function clockHtml() {
-    var B = confBook, P = tcParts(B ? B.minutes : 0);
-    function at(mm) { return (mm / NET_SESSION * 100).toFixed(2) + '%'; }
-    var ticks = [30, 150, 270].map(function (mm) { return '<i class="tc-tick" style="left:' + at(mm) + '"></i>'; }).join('');
+    var P = tcParts(), L = P.len;
+    function at(mm) { return (mm / L * 100).toFixed(2) + '%'; }
+    var hrs = [30, 150, 270].filter(function (mm) { return mm < L; });
+    var ticks = hrs.map(function (mm) { return '<i class="tc-tick" style="left:' + at(mm) + '"></i>'; }).join('');
     var mk = '', leg = '';
     if (netDay && netDay.day === P.day && netDay.hist.length && P.status !== 'Pre-market') {
       mk = '<i class="tc-mk hi" data-tc="peak" style="left:' + at(netDay.net.hiM) + '" title="Net today peak ' + tradeClock(netDay.net.hiM) + '"></i>' +
         '<i class="tc-mk lo" data-tc="low" style="left:' + at(netDay.net.loM) + '" title="Net today low ' + tradeClock(netDay.net.loM) + '"></i>';
       leg = '<div class="small muted tc-leg"><i class="tc-k hi"></i>Net today peak ' + tradeClock(netDay.net.hiM) + ' · <i class="tc-k lo"></i>low ' + tradeClock(netDay.net.loM) + '</div>';
     }
-    return '<div class="tc-top"><div><div class="small muted">Trading day clock · sim day <b id="tc-day">' + P.day + '</b></div>' +
-      '<div class="tc-time" id="tc-time" data-m="' + P.m.toFixed(2) + '">' + P.time + '<small>' + P.ap + '</small></div></div>' +
-      '<div style="text-align:right"><span class="tc-status ' + P.status.toLowerCase().replace(/[^a-z]/g, '') + '" id="tc-status">' + P.status + '</span>' +
-      '<div class="small muted" style="margin-top:4px"><b id="tc-pct">' + Math.round(P.pct * 100) + '%</b> of session · ' + Math.round(NET_SESSION - P.m) + ' min left</div></div></div>' +
-      '<div class="tc-hours"><span style="left:' + at(30) + '">10</span><span style="left:' + at(150) + '">12</span><span style="left:' + at(270) + '">2</span></div>' +
+    var nx = P.status === 'Open' ? '' : '<div class="small muted" id="tc-next">Next open ' + MK.dateLabel(P.S.next.date) + ', 9:30 AM ET' + (P.S.next.early ? ' (early close 1:00 PM)' : '') + '</div>';
+    return '<div class="tc-top"><div><div class="small muted">Trading day clock · <b id="tc-day">' + P.label + '</b> · ET</div>' +
+      '<div class="tc-time" id="tc-time" data-m="' + P.m.toFixed(2) + '">' + P.time + '<small>' + P.ap + ' ET</small></div></div>' +
+      '<div style="text-align:right"><span class="tc-status ' + P.status.toLowerCase().replace(/[^a-z]/g, '') + '" id="tc-status">' + P.status + '</span>' + (P.why ? '<div class="small muted" id="tc-why">' + esc(P.why) + '</div>' : '') +
+      '<div class="small muted" style="margin-top:4px"><b id="tc-pct">' + Math.round(P.pct * 100) + '%</b> of session · ' + (P.status === 'Open' ? Math.round(L - P.m) + ' min left' : P.status === 'Pre-market' ? 'opens 9:30 AM' : P.S.reason ? 'no session today' : 'session over') + '</div></div></div>' +
+      '<div class="tc-hours">' + hrs.map(function (mm) { return '<span style="left:' + at(mm) + '">' + ({ 30: '10', 150: '12', 270: '2' })[mm] + '</span>'; }).join('') + '</div>' +
       '<div class="tc-bar" role="progressbar" aria-label="Trading session elapsed" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + Math.round(P.pct * 100) + '">' +
       '<div class="tc-fill" style="width:' + (P.pct * 100).toFixed(2) + '%"></div>' + ticks + mk + '<i class="tc-now" style="left:' + (P.pct * 100).toFixed(2) + '%"></i></div>' +
-      '<div class="tc-axis"><span>9:30 AM open</span><span>4:00 PM close</span></div>' + leg;
+      '<div class="tc-axis"><span>9:30 AM open</span><span>' + (L === 390 ? '4:00 PM close' : MK.hm(570 + L) + ' early close') + '</span></div>' + nx + leg;
   }
   function clockCard() { return '<div class="card tclock" id="tclock" aria-live="off">' + clockHtml() + '</div>'; }
   function clockLive() { var el = document.getElementById('tclock'); if (el) el.innerHTML = clockHtml(); }
@@ -620,7 +666,7 @@
     if (!N || !N.hist.length) return '<div class="net-range" id="net-range"><div class="small"><b>Net today</b> <span class="muted">· collecting…</span></div></div>';
     var h = N.hist.length > 1 ? N.hist : [N.hist[0], N.hist[0]];
     var lo = Math.min(N.net.lo, N.aft.lo), hi = Math.max(N.net.hi, N.aft.hi), rg = hi - lo || 1, W = 120, H = 40;
-    function X(mm) { return (mm / NET_SESSION * W).toFixed(1); }
+    function X(mm) { return (mm / (N.len || NET_SESSION) * W).toFixed(1); }
     function Y(x) { return (36 - (x - lo) / rg * 32).toFixed(1); }
     function dot(x, y, c, k) { return '<path class="net-dot-' + k + '" d="M' + x + ' ' + y + 'h0" style="stroke:' + c + '" stroke-width="6" stroke-linecap="round" vector-effect="non-scaling-stroke"/>'; } // stays round when stretched
     function line(ix, c, dash) { return '<polyline points="' + h.map(function (p) { return X(p[0]) + ',' + Y(p[ix]); }).join(' ') + '" fill="none" style="stroke:' + c + '" stroke-width="1.5"' + (dash ? ' stroke-dasharray="3 2"' : '') + ' vector-effect="non-scaling-stroke"/>'; }
@@ -636,7 +682,7 @@
         '<div class="net-cell"><div class="k">Low</div><div class="v ' + (R.lo >= 0 ? 'up' : 'down') + '">' + sg(R.lo) + '</div><div class="t">' + tradeClock(R.loM) + '</div></div></div>';
     }
     return '<div class="net-range" id="net-range" data-day="' + N.day + '">' +
-      '<div class="small"><b>Net today</b> <span class="muted">· sim day ' + N.day + ' · ' + tradeClock(0) + '–' + tradeClock(NET_SESSION) + '</span></div>' +
+      '<div class="small"><b>Net today</b> <span class="muted">· ' + (typeof N.day === 'string' ? MK.dateLabel(N.day) : 'sim day ' + N.day) + ' · ' + tradeClock(0) + '–' + tradeClock(N.len || NET_SESSION) + ' ET</span></div>' +
       '<div class="small muted" id="net-parts" data-cash="' + (N.cashT || 0) + '">today: premiums ' + sg(N.colT || 0) + ' · cash paid for cash-ins ' + sg(-(N.cashT || 0)) + ' · shares taken in, at market ' + sg(N.mvT || 0) + '</div>' +
       '<div class="net-row"><div class="net-lines">' +
       row('net-today', 'Net', 'premiums − cash paid + shares at market', N.net) +
@@ -778,6 +824,7 @@
         return 'First minute of a new lock' + (pb.clampedTo === 'putfloor' ? ' (put-value floor)' : pb.clampedTo === 'cap' ? ' ($6 cap)' : '') + '; then day 1 base ' + rateStr(pb.baseRaw) + ', day 2 ×0.41, day 20 ×0.11. Live preview moves with volatility & news until you lock.';
       case 'capline': var cn = ins ? ins.shares : capFor(t, sim.price(t)); return capLine(t, ins ? ins.lockIn : sim.price(t), cn);
       case 'simclock': return new Date(simNow()).toLocaleString() + ' · ×' + state.clock.speed;
+      case 'mktclock': return (function (L) { return L.title + ' · ' + L.text; })(MK.label(state.mkt.at));
     }
     if (!ins) return '';
     var S = sim.price(t);
@@ -879,9 +926,14 @@
       case 'sell':
         if (!el.dataset.armed) { el.dataset.armed = '1'; el.textContent = 'Sell?'; el.classList.add('armed'); setTimeout(function () { if (el.isConnected) { delete el.dataset.armed; el.textContent = 'Sell'; el.classList.remove('armed'); } }, 3000); break; }
         sellPos(t); break;
-      case 'nudge-dismiss': if (nudge) window.PCNudge.dismiss(nudge, t); pfLive(); break; // "Not now": silenced for the rest of the sim trading day
+      case 'alert-dismiss': if (AL) { AL.dismiss(alerts, t); alertsSave(); alertHits = AL.active(alerts, alertQuotes(), prevCloseOf); render.noScroll = true; render(); } break; // hidden for the rest of this session
+      case 'alert-save': if (AL) {
+        var fm = document.getElementById('alertCard'), val = function (nm) { return fm.querySelector('[name=' + nm + ']').value.trim(); };
+        var r = AL.set(alerts, t, { down: val('down'), up: val('up'), level: val('level') }, sim.price(t));
+        if (!r.ok) { fm.querySelector('[data-alert-err]').textContent = r.errors.join(' · '); break; }
+        alertsSave(); alertHits = AL.active(alerts, alertQuotes(), prevCloseOf); render.noScroll = true; render(); toast(r.cfg ? '🔔 Alert saved for ' + t : 'Alert removed for ' + t); } break;
+      case 'alert-remove': if (AL) { AL.remove(alerts, t); alertsSave(); alertHits = AL.active(alerts, alertQuotes(), prevCloseOf); render.noScroll = true; render(); toast('Alert removed for ' + t); } break;
       case 'toggle-ins':
-        if (nudge) window.PCNudge.coverageChanged(nudge, t); // nudge1: a flip stops that row's nudge at once
         if (!state.ins[t] && el.getAttribute('aria-disabled') === 'true') { enableIns(t); break; } // tabs1: at a per-person cap, stays off
         if (state.ins[t]) disableIns(t);
         else if (!isMember()) { memberPick = 'yearly'; openSheet('member', { t: t }); break; }
@@ -904,10 +956,10 @@
       case 'news':
         if (newsScore(t) > 0.01) state.news[t] = []; else { state.news[t] = [{ at: simNow(), sev: 1, rel: 1 }]; toast('⚡ Demo news shock on ' + t + ' — H = 1, decays over ~20 sim-min'); }
         save(); live(); break;
-      case 'skip': accrue(); state.clock.offset += +el.dataset.ms; accrue(); save(); live(); toast('⏩ Skipped ' + (+el.dataset.ms === DAY ? '24 hours' : '1 hour') + ' (demo clock)'); break;
+      case 'skip': accrue(); state.clock.offset += +el.dataset.ms; accrue(); mktAdvance(+el.dataset.ms); save(); live(); toast('⏩ Skipped ' + (+el.dataset.ms === DAY ? '24 hours' : '1 hour') + ' (demo clock; market: ' + MK.label(state.mkt.at).title.toLowerCase() + ')'); break;
       case 'speed': state.clock.speed = +el.dataset.x; save(); render.noScroll = true; render(); break;
       case 'reset':
-        if (el.dataset.armed) { localStorage.removeItem(KEY); state = freshState(); state.conf = { target: 0, mood: 0, open: null }; confHist = []; confLast = null; confBook = window.PCConfidence ? window.PCConfidence.newBook() : null; netDay = null; netLast = null; state.paid = 0; state.rebated = 0; state.cash = 0; invHist = []; pfHist = {}; pfOrder = null; nudge = window.PCNudge ? window.PCNudge.create() : null; nudgeMin = 0; if (window.PCBouncer && window.PCBouncer.reset) window.PCBouncer.reset(); sim = newSim({}); window.__paracord.sim = sim; STOCKS.forEach(function (s) { state.open[s.t] = sim.price(s.t); }); save(); replace({ view: 'home' }); toast('Demo reset'); }
+        if (el.dataset.armed) { localStorage.removeItem(KEY); state = freshState(); state.conf = { target: 0, mood: 0, open: null }; confHist = []; confLast = null; confBook = window.PCConfidence ? window.PCConfidence.newBook() : null; netDay = null; netLast = null; state.paid = 0; state.rebated = 0; state.cash = 0; invHist = []; pfHist = {}; pfOrder = null;  if (AL) { try { localStorage.removeItem(ALERTS_KEY); } catch (e3) {} alertsSeed(); alertHits = []; } state.mkt = mktFresh(); state.pc = { date: null, px: {} }; try { localStorage.removeItem('p13:bouncerK'); } catch (e2) {} if (window.PCBouncer && window.PCBouncer.reseedK) window.PCBouncer.reseedK(); else if (window.PCBouncer && window.PCBouncer.reset) window.PCBouncer.reset(); sim = newSim({}); window.__paracord.sim = sim; STOCKS.forEach(function (s) { state.open[s.t] = sim.price(s.t); }); save(); replace({ view: 'home' }); toast('Demo reset'); }
         else { el.dataset.armed = '1'; el.textContent = 'Tap again to reset everything'; }
         break;
       case 'cashout': go({ view: 'cashout', t: t, step: 'summary', n: state.ins[t].shares, flow: Date.now().toString(36) }); break;
@@ -930,6 +982,7 @@
   }
   document.addEventListener('input', function (e) {
     if (e.target.id === 'coN' || e.target.id === 'coR') setN(+e.target.value);
+    if (e.target.closest && e.target.closest('#alertCard')) { var ae = document.querySelector('#alertCard [data-alert-err]'); if (ae) ae.textContent = ''; }  // stale validation error clears on edit
     if (e.target.id === 'confSlider') confSet(+e.target.value / 100);
     if (e.target.id === 'memberAgree') { var jb = document.getElementById('memberJoin'); if (jb) jb.disabled = !e.target.checked; }
     if (e.target.id === 'kslider') {
@@ -948,10 +1001,31 @@
   document.querySelectorAll('.tabs button').forEach(function (b) { b.onclick = function () { tab(b.dataset.tab); }; });
 
   /* ---------------- loop ---------------- */
+  /** bouncerfix1: calendar time jump on the market clock (Skip 1 hour / 24 hours); a closed landing waits for the next open */
+  function mktAdvance(ms) { var was = MK.status(state.mkt.at); state.mkt.at += ms; mktCloseCheck(was); }
+  /** when the clock leaves a session (close bell, or a skip past it), record that session's closing prices = next previous close */
+  function mktCloseCheck(was) {
+    var S = MK.status(state.mkt.at);
+    if (was.open && (!S.open || S.date !== was.date)) {
+      var px = {}; heldTickers().forEach(function (d) { if (sim.has(d.t)) px[d.t] = +sim.price(d.t).toFixed(4); });
+      STOCKS.forEach(function (x) { px[x.t] = +sim.price(x.t).toFixed(4); });
+      state.pc = { date: was.date, px: px };
+    }
+  }
+  var CLOSED_DWELL_TICKS = 8, closedTicks = 0;
   function tick() {
     var nowR = Date.now();
     state.clock.offset += (nowR - lastReal) * (state.clock.speed - 1);
     lastReal = nowR;
+    // market clock: one session minute per tick; a closed instant (bell, night, weekend, holiday) is shown for CLOSED_DWELL_TICKS
+    // ticks so the closed state is visible, then the clock jumps to the next open (demo pacing; billing time is separate)
+    var was = MK.status(state.mkt.at);
+    if (was.open || ++closedTicks > CLOSED_DWELL_TICKS) { closedTicks = 0; state.mkt.at = MK.stepClock(state.mkt.at); mktCloseCheck(was); }
+    var C = mktClk();
+    if (!C.open) { // closed (after the bell, night, weekend, holiday): prices and the book stand still; the Bouncer is told the market is closed
+      if (window.PCBouncer && window.PCBouncer.tick) window.PCBouncer.tick(null, confBook, C);
+      accrue(); save(); live(); return;
+    }
     sim.step();
     STOCKS.forEach(function (s) { state.px[s.t] = sim.price(s.t); });
     Object.keys(state.ins).forEach(function (t) { if (sim.has(t)) state.px[t] = sim.price(t); }); // tabs1: covered portfolio names keep their price across reloads
@@ -960,20 +1034,29 @@
     state.conf.mood += (state.conf.target - state.conf.mood) * 0.25;
     sim.setScenario(state.conf.mood < 0 ? state.conf.mood * 3 : state.conf.mood * 1.5); // p9: scenario drives the sim's market factor
     confNoise = 0.92 * confNoise + 0.12 * (Math.random() + Math.random() + Math.random() - 1.5) * 2;
-    var cr = confCompute(); if (cr) { confHist.push(cr.index); if (confHist.length > 240) confHist.shift(); if (confBook) { window.PCConfidence.accrue(confBook, cr, 1); netTrack(confBook); invHist.push(confBook.invValue); if (invHist.length > 240) invHist.shift(); } } // 1 tick = 1 sim trading minute
-    nudgeStep();
-    if (window.PCBouncer && window.PCBouncer.tick) window.PCBouncer.tick(cr, confBook); // bouncer1: ops alert, once per sim minute
+    var cr = confCompute(); if (cr) { confHist.push(cr.index); if (confHist.length > 240) confHist.shift(); if (confBook) { window.PCConfidence.accrue(confBook, cr, 1); netTrack(confBook, C); invHist.push(confBook.invValue); if (invHist.length > 240) invHist.shift(); } } // 1 tick = 1 session minute
+    alertStep(C);
+    if (window.PCBouncer && window.PCBouncer.tick) window.PCBouncer.tick(cr, confBook, C); // ops alert, once per session minute, on the market calendar
     accrue(); save(); live();
   }
-  /* nudge1: one nudge evaluation per sim trading minute over every held position (not only rows on screen) */
-  function nudgeStep() {
-    if (!nudge) return;
-    nudgeMin += 1;
-    var mins = confBook ? confBook.minutes : nudgeMin, day = tcParts(mins).day;
-    var rows = heldTickers().map(function (d) { return { t: d.t, price: sim.price(d.t), covered: !!state.ins[d.t], capped: capped(d.t) }; });
-    window.PCNudge.step(nudge, day, mins, rows, openOf); // previous close on day 1 = the session's opening price (no prior close in the sim)
+  /* bouncerfix1: price alerts, evaluated once per session minute (market open only) for every stock with an alert set */
+  function alertQuotes() { var q = {}; if (alerts) Object.keys(alerts.alerts).forEach(function (t) { if (sim.has(t)) q[t] = sim.price(t); }); return q; }
+  function alertStep(C) {
+    if (!AL) return;
+    var before = JSON.stringify(alerts.hits) + alerts.date;
+    alertHits = AL.step(alerts, C.S.date, MK.hm(C.S.et.min) + ' ET', alertQuotes(), prevCloseOf);
+    if (JSON.stringify(alerts.hits) + alerts.date !== before) alertsSave();
+    alertCardLive();
+  }
+  /** stock page: keep the alert card's triggered message current (the rest of the card is a form, left alone while typing) */
+  function alertCardLive() {
+    var box = document.querySelector('#alertCard [data-alert-hits]'); if (!box) return;
+    var t = document.getElementById('alertCard').dataset.t, hs = hitsOf(t), k = alertKey(hs);
+    if (box.dataset.alertHits !== k) { box.dataset.alertHits = k; box.innerHTML = alertHtml(hs, t); }
   }
 
+  // bouncerfix1: hits already latched in this session (stored) show at once after a reload, before the first tick
+  if (AL && alerts && alerts.date === MK.status(state.mkt.at).date) alertHits = AL.active(alerts, alertQuotes(), prevCloseOf);
   // initial route (supports deep links like #/stock/COP)
   var m = location.hash.match(/^#\/(\w+)(?:\/(\w+))?/);
   history.replaceState({ view: 'home' }, '', '#/home');
@@ -984,5 +1067,6 @@
   setInterval(tick, 1000);
 
   // test/demo hook (read-only helpers)
-  window.__paracord = { state: function () { return state; }, rate: rateOf, breakdown: breakdown, capFor: capFor, isMember: isMember, sim: sim, news: newsScore, confidence: function () { return confLast; }, book: function () { return confBook; }, netDay: function () { return netDay; }, nudge: function () { return nudge; } };
+  window.__paracord = { state: function () { return state; }, rate: rateOf, breakdown: breakdown, capFor: capFor, isMember: isMember, sim: sim, news: newsScore, confidence: function () { return confLast; }, book: function () { return confBook; }, netDay: function () { return netDay; }, alerts: function () { return alerts; }, alertHits: function () { return alertHits; }, alertsApi: { set: function (t, cfg) { var r = AL.set(alerts, t, cfg, sim.price(t)); alertsSave(); return r; }, remove: function (t) { AL.remove(alerts, t); alertsSave(); } }, market: function () { return mktClk(); }, prevCloseOf: prevCloseOf,
+    setMarketClock: function (ms) { var was = MK.status(state.mkt.at); state.mkt.at = ms; mktCloseCheck(was); save(); live(); } }; // test hook: put the sim market clock at an instant
 })();
